@@ -1,0 +1,24 @@
+; ball - Block 0 - Size: 16x16
+ db 0,0
+ db 15,15
+; ball - Block 1 - Size: 16x16
+ db 0,0
+ db 15,15
+; ball - Block 2 - Size: 16x16
+ db 0,0
+ db 15,15
+; ball - Block 3 - Size: 16x16
+ db 0,0
+ db 15,15
+; ball - Block 4 - Size: 16x16
+ db 0,0
+ db 15,15
+; ball - Block 5 - Size: 16x16
+ db 0,0
+ db 15,15
+; ball - Block 6 - Size: 16x16
+ db 0,0
+ db 15,15
+; ball - Block 7 - Size: 16x16
+ db 0,0
+ db 15,15

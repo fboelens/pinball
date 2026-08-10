@@ -1,0 +1,20 @@
+Sjasm Z80 Assembler v0.42c - www.xl2s.tk             [2026.08.10 - 17:27:29]
+
+C:\msx\sjasm\sjasm.exe_
+Errors: 1
+
+C:\msx\sjasm\sjasm.exe_(1) : Illegal character(s)
+       1   00:0000                      MZê
+
+    LABELS
+-------------------------------------------------
+00:00000000 X MZ
+
+
+ Output: -s
+-------------------------------------------------
+
+ Page: 00
+  Org: 00000000  Size: *  Used: 00000000
+
+    No output

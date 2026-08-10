@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<map version="1.10" tiledversion="1.12.1" orientation="orthogonal" renderorder="right-down" width="30" height="20" tilewidth="4" tileheight="4" infinite="0" nextlayerid="3" nextobjectid="7">
+ <tileset firstgid="1" source="flippers.tsx"/>
+ <layer id="1" name="Tilelaag 1" width="30" height="20">
+  <data encoding="csv">
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+1,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+4,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,6,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+</data>
+ </layer>
+ <objectgroup id="2" name="FlipperCollisions">
+  <object id="1" name="left1" type="flipper" x="0" y="0">
+   <properties>
+    <property name="collision_type" value="flipper"/>
+    <property name="frame" type="int" value="0"/>
+    <property name="side" value="left"/>
+   </properties>
+   <polygon points="0,4 4,0 8,0 32,12 32,16 28,16 0,8"/>
+  </object>
+  <object id="2" name="left2" type="flipper" x="32" y="4">
+   <properties>
+    <property name="collision_type" value="flipper"/>
+    <property name="frame" type="int" value="1"/>
+    <property name="side" value="left"/>
+   </properties>
+   <polygon points="0,0 4,-4 32,-4 32,0 8,8 4,8 0,4"/>
+  </object>
+  <object id="3" name="left3" type="flipper" x="64" y="8">
+   <properties>
+    <property name="collision_type" value="flipper"/>
+    <property name="frame" type="int" value="2"/>
+    <property name="side" value="left"/>
+   </properties>
+   <polygon points="0,0 28,-8 32,-8 32,-4 8,8 4,8 0,4"/>
+  </object>
+  <object id="4" name="right1" type="flipper" x="0" y="28">
+   <properties>
+    <property name="collision_type" value="flipper"/>
+    <property name="frame" type="int" value="0"/>
+    <property name="side" value="right"/>
+   </properties>
+   <polygon points="0,0 24,-12 28,-12 32,-8 32,-4 4,4 0,4"/>
+  </object>
+  <object id="5" name="right2" type="flipper" x="32" y="16">
+   <properties>
+    <property name="collision_type" value="flipper"/>
+    <property name="frame" type="int" value="1"/>
+    <property name="side" value="right"/>
+   </properties>
+   <polygon points="0,0 28,0 32,4 32,8 28,12 24,12 0,4"/>
+  </object>
+  <object id="6" name="right3" type="flipper" x="64" y="16">
+   <properties>
+    <property name="collision_type" value="flipper"/>
+    <property name="frame" type="int" value="2"/>
+    <property name="side" value="right"/>
+   </properties>
+   <polygon points="0,0 4,0 32,8 32,12 28,16 24,16 0,4"/>
+  </object>
+ </objectgroup>
+</map>

@@ -1,0 +1,122 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "BuildAll",
+            "dependsOn": [
+                "Sjasm correct files",
+                "Compress images",
+                "SjASM build Pinball rom"
+            ],
+            "dependsOrder": "sequence",
+            "problemMatcher": []
+        },
+        {
+            "label": "Sjasm correct files",
+            "type": "shell",
+            "command": "sjasm",
+            "options": {
+                "cwd": "C:/msx/pinball"
+            },
+            "args": [
+                "-j",
+                "-s",
+                "correctfiles.asm"
+            ],
+            "windows": {
+                "command": "c:/msx/sjasm/sjasm.exe",
+                "options": {
+                    "shell": {
+                        "executable": "C:\\WINDOWS\\System32\\cmd.exe",
+                        "args": [
+                            "/d",
+                            "/c"
+                        ]
+                    }
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "isBackground": false,
+            "presentation": {
+                "echo": false,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$errmatcher-sjasm"
+        },
+        {
+            "label": "SjASM build pinball rom",
+            "type": "shell",
+            "command": "sjasm",
+            "options": {
+                "cwd": "C:/msx/pinball"
+            },
+            "args": [
+                "-j",
+                "-s",
+                "pinball.asm"
+            ],
+            "windows": {
+                "command": "c:/msx/sjasm/sjasm.exe",
+                "options": {
+                    "shell": {
+                        "executable": "C:\\WINDOWS\\System32\\cmd.exe",
+                        "args": [
+                            "/d",
+                            "/c"
+                        ]
+                    }
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "isBackground": false,
+            "presentation": {
+                "echo": false,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$errmatcher-sjasm"
+        },
+        {
+            "label": "Compress images",
+            "type": "shell",
+            "command": "sjasm",
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "windows": {
+                "command": "C:/msx/pinball/gfx/compressimages.bat",
+                "options": {
+                    "shell": {
+                        "executable": "C:\\WINDOWS\\System32\\cmd.exe",
+                        "args": [
+                            "/d",
+                            "/c"
+                        ]
+                    }
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "isBackground": false,
+            "presentation": {
+                "echo": false,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$errmatcher-sjasm"
+        }
+    ]    
+
+}

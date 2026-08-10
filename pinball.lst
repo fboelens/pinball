@@ -1,0 +1,2925 @@
+Sjasm Z80 Assembler v0.42c - www.xl2s.tk             [2026.08.10 - 17:44:47]
+
+pinball.asm
+Errors: 0
+
+       1   00:0000                      ; -----------------------------------------------------------------------------
+       2   00:0000                      ; MSX2 SCREEN 5 pinball movement demo (Z80 / SJASM)
+       3   00:0000                      ;
+       4   00:0000                      ; Build from the repository root:
+       5   00:0000                      ;     .\sjasm.exe -s pinball.asm
+       6   00:0000                      ;
+       7   00:0000                      ; Output: pinball.rom (32 KiB)
+       8   00:0000                      ;
+       9   00:0000                      ; Controls:
+      10   00:0000                      ;   cursor/joystick left  - left flipper
+      11   00:0000                      ;   cursor/joystick right - right flipper
+      12   00:0000                      ;   space / trigger 1     - both flippers, and launch a waiting ball
+      13   00:0000                      ;
+      14   00:0000                      ; The ball uses signed 8.8 fixed-point position and velocity.  The high byte of
+      15   00:0000                      ; each position is the visible pixel coordinate; the low byte is the fraction.
+      16   00:0000                      ; Gravity, rebounds and flipper impulses therefore remain smooth on a 3.58 MHz
+      17   00:0000                      ; Z80 without multiplication or division.
+      18   00:0000                      ;
+      19   00:0000                      ; Reading guide
+      20   00:0000                      ; -------------
+      21   00:0000                      ; 1. MainLoop synchronises to VBlank, updates graphics/input, then physics.
+      22   00:0000                      ; 2. StepBall applies gravity and divides movement into four collision steps.
+      23   00:0000                      ; 3. ResolveTileX/Y handles the static 8x8 collision map.
+      24   00:0000                      ; 4. CheckMapPolygons/Circles handles objects from Tiled's PinballObjects layer.
+      25   00:0000                      ; 5. CheckFlippers handles frame-specific polygons from maps/flippers.tmx.
+      26   00:0000                      ; 6. The Video section uploads generated assets and updates sprites/animations.
+      27   00:0000                      ;
+      28   00:0000                      ; Coordinate conventions
+      29   00:0000                      ; ----------------------
+      30   00:0000                      ; BALL_X/BALL_Y are the top-left of the 16x16 sprite box. Collision routines
+      31   00:0000                      ; normally add 8 to obtain the ball centre. Positive X points right; positive Y
+      32   00:0000                      ; points down. Consequently a negative BALL_VY means that the ball is rising.
+      33   00:0000                      ;
+      34   00:0000                      ; 8.8 examples: 0100h=+1.0, 0040h=+0.25, FF00h=-1.0. Stored velocities and
+      35   00:0000                      ; frame movement use the same full-speed time base, which keeps collision
+      36   00:0000                      ; thresholds, impulses and visible travel directly comparable.
+      37   00:0000                      ; -----------------------------------------------------------------------------
+      38   00:0000                      
+      39   00:0000                              output  pinball.rom
+      40   00:4000                      
+      41   00:4000                      ; MSX BIOS entry points and BIOS shadow registers used by this ROM.
+      42   00:4000  (00:005F)           CHGMOD: equ     005fh
+      43   00:4000  (00:00D5)           GTSTCK: equ     00d5h
+      44   00:4000  (00:00D8)           GTTRIG: equ     00d8h
+      45   00:4000  (00:005C)           LDIRVM: equ     005ch
+      46   00:4000  (00:0047)           WRTVDP: equ     0047h
+      47   00:4000  (00:F3E0)           RG1SAV: equ     0f3e0h
+      48   00:4000                      
+      49   00:4000                      ; VRAM layout used by the two overlapping ball sprites.
+      50   00:4000  (00:7400)           SPRITE_COLORS:  equ 7400h
+      51   00:4000  (00:7600)           SPRITE_ATTR:    equ 7600h
+      52   00:4000  (00:7800)           SPRITE_PATTERNS:equ 7800h
+      53   00:4000                      
+      54   00:4000                      ; Safety limits. The authored tilemap is authoritative; these only stop a ball
+      55   00:4000                      ; escaping if a malformed map contains an unintended opening.
+      56   00:4000  (00:0000)           LEFT_WALL:      equ 0               ; emergency bounds outside the tile walls
+      57   00:4000  (00:00F0)           RIGHT_WALL:     equ 240
+      58   00:4000  (00:0000)           TOP_WALL:       equ 0
+      59   00:4000  (00:00CC)           DRAIN_Y:        equ 204
+      60   00:4000                      
+      61   00:4000                      ; Physics tuning. Values are signed 8.8 pixels per simulation frame.
+      62   00:4000  (00:0018)           GRAVITY:        equ 0018h           ; +0.09375 velocity per full-speed frame
+      63   00:4000  (00:0018)           PHYSICS_GRAVITY:equ GRAVITY         ; full acceleration per display frame
+      64   00:4000  (00:0500)           MAX_FALL_SPEED: equ 0500h           ; +5 pixels/frame
+      65   00:4000  (00:FEC0)           LAUNCH_VX:      equ 0fec0h          ; -1.25 pixels/frame, clearly toward left
+      66   00:4000  (00:F900)           LAUNCH_VY:      equ 0f900h          ; -7 pixels/frame, reaches the top arc
+      67   00:4000  (00:FD00)           FLIPPER_BASE_VY:equ 0fd00h          ; -3 pixels/frame near the pivot
+      68   00:4000  (00:FC00)           FLIPPER_MID_VY: equ 0fc00h          ; -4 pixels/frame halfway out
+      69   00:4000  (00:FB00)           FLIPPER_TIP_VY: equ 0fb00h          ; -5 pixels/frame at the tip
+      70   00:4000  (00:0200)           TUBE_EXIT_VX:   equ 0200h           ; +2 pixels/frame
+      71   00:4000  (00:FE80)           TUBE_EXIT_VY:   equ 0fe80h          ; -1.5 pixels/frame
+      72   00:4000                      ; Writable state in RAM. Keeping variables at fixed addresses makes them easy
+      73   00:4000                      ; to inspect from openMSX's debugger and from the automated Tcl smoke tests.
+      74   00:4000  (00:C000)           BALL_X:         equ 0c000h           ; word, 8.8 fixed point
+      75   00:4000  (00:C002)           BALL_Y:         equ 0c002h           ; word, 8.8 fixed point
+      76   00:4000  (00:C004)           BALL_VX:        equ 0c004h           ; word, signed 8.8
+      77   00:4000  (00:C006)           BALL_VY:        equ 0c006h           ; word, signed 8.8
+      78   00:4000  (00:C008)           BALL_WAITING:   equ 0c008h           ; 1 while parked in the launch lane
+      79   00:4000  (00:C009)           BUMPER_LOCK:    equ 0c009h           ; short global anti-double-trigger timer
+      80   00:4000  (00:C00A)           LEFT_ACTIVE:    equ 0c00ah           ; current input state, 0 or 1
+      81   00:4000  (00:C00B)           RIGHT_ACTIVE:   equ 0c00bh
+      82   00:4000  (00:C00C)           BALL_SIDE:      equ 0c00ch           ; temporary contact id: normal 0..7 or flipper 1..4
+      83   00:4000  (00:C00D)           BALL_IN_TUBE:   equ 0c00dh           ; covered tube owns movement while nonzero
+      84   00:4000  (00:C00E)           TUBE_INDEX:     equ 0c00eh           ; byte offset into TubePath
+      85   00:4000  (00:C00F)           BALL_HIT_X:     equ 0c00fh           ; signed centre-to-object delta
+      86   00:4000  (00:C010)           BALL_HIT_Y:     equ 0c010h
+      87   00:4000  (00:C011)           LEFT_FRAME:     equ 0c011h           ; 0=rest, 1=middle, 2=raised
+      88   00:4000  (00:C012)           RIGHT_FRAME:    equ 0c012h
+      89   00:4000  (00:C013)           BALL_FRAME:     equ 0c013h           ; 0=top, clockwise through 7=top-left
+      90   00:4000  (00:C014)           BALL_ROLL_ACCUM:equ 0c014h           ; word, accumulated horizontal distance
+      91   00:4000  (00:C016)           LEFT_KICK:      equ 0c016h           ; nonzero only while flipper moves upward
+      92   00:4000  (00:C017)           RIGHT_KICK:     equ 0c017h
+      93   00:4000  (00:C018)           OBJECT_RADIUS:  equ 0c018h           ; expanded object+ball collision radius
+      94   00:4000  (00:C019)           OBJECT_RADIUS_SQ:equ 0c019h          ; word
+      95   00:4000  (00:C01B)           LAST_BUMPER_PTR:equ 0c01bh           ; last actively fired object record
+      96   00:4000  (00:C01D)           ABS_HIT_X:      equ 0c01dh
+      97   00:4000  (00:C01E)           ABS_HIT_Y:      equ 0c01eh
+      98   00:4000  (00:C01F)           LAST_BUMPER_KIND:equ 0c01fh          ; 0=none, 1=circle, 2=polygon field
+      99   00:4000  (00:C020)           POLY_LOCAL_X:   equ 0c020h           ; scratch X inside a compiled polygon field
+     100   00:4000  (00:C021)           POLY_FIELD_VALUE:equ 0c021h          ; scratch nibble/normal selector
+     101   00:4000  (00:C022)           OBJECT_ANIM_TIMER:equ 0c022h         ; bit 7=pending draw, low bits=hold frames
+     102   00:4000  (00:C023)           OBJECT_ANIM_SOURCE_X:equ 0c023h       ; XOR-delta frame in hidden VRAM atlas
+     103   00:4000  (00:C024)           OBJECT_ANIM_TARGET_X:equ 0c024h
+     104   00:4000  (00:C025)           OBJECT_ANIM_TARGET_Y:equ 0c025h
+     105   00:4000  (00:C027)           FLIPPER_OLD_VX: equ 0c027h           ; scratch: velocity before passive contact
+     106   00:4000  (00:C029)           FLIPPER_OLD_VY: equ 0c029h
+     107   00:4000  (00:C02B)           FLIPPER_NORMAL: equ 0c02bh           ; approach speed along flipper normal
+     108   00:4000  (00:C02D)           FLIPPER_DISTANCE:equ 0c02dh          ; absolute ball-centre distance from axle
+     109   00:4000  (00:C02E)           FLIPPER_PIVOT_Y:equ 0c02eh           ; current map instance pivot
+     110   00:4000  (00:C02F)           FLIPPER_PIVOT_X:equ 0c02fh           ; current instance pivot for field lookup
+     111   00:4000  (00:C030)           OBJECT_ANIM_COMMAND:equ 0c030h        ; 15-byte V9938 LMMM command block
+     112   00:4000  (00:C03F)           OBJECT_CONTACT: equ 0c03fh            ; polygon owns this physics substep when nonzero
+     113   00:4000                      
+     114   00:4000                      ; Page 2 is writable RAM in this cartridge configuration. After the temporary
+     115   00:4000                      ; playfield decompression buffers have been uploaded to VRAM, this address is
+     116   00:4000                      ; reused for the expanded variable-size polygon collision records.
+     117   00:4000  (00:8000)           PolygonObjects: equ 08000h
+     118   00:4000  (00:C100)           SAT_SHADOW:     equ 0c100h           ; 32 bytes
+     119   00:4000                      
+     120   00:4000                              org     4000h
+     121   00:4000                      
+     122   00:4000                              ; Standard MSX ROM header. "AB" identifies a cartridge; Start is the
+     123   00:4000                              ; initialisation entry point called by the BIOS.
+     124   00:4000  41 42                       db      "AB"
+     125   00:4002  10 40                       dw      Start
+     126   00:4004  00 00                       dw      0
+     127   00:4006  00 00                       dw      0
+     128   00:4008  00 00                       dw      0
+     129   00:400A  00 (6)                      ds      6,0
+     130   00:4010                      
+     131   00:4010                      Start:
+     132   00:4010                              ; Use a known stack below the BIOS work area and retain normal IM 1
+     133   00:4010                              ; interrupts so HALT can be used as a VBlank synchronisation point.
+     134   00:4010  F3                          di
+     135   00:4011  31 80 F3                    ld      sp,0f380h
+     136   00:4014  ED 56                       im      1
+     137   00:4016  FB                          ei
+     138   00:4017                      
+     139   00:4017  3E 05                       ld      a,5                  ; SCREEN 5, 256x212, 16 colours
+     140   00:4019  CD 5F 00                    call    CHGMOD
+     141   00:401C  01 07 01                    ld      bc,0107h             ; dark border matching the playfield
+     142   00:401F  CD 47 00                    call    WRTVDP
+     143   00:4022  AF                          xor     a
+     144   00:4023  32 22 C0                    ld      (OBJECT_ANIM_TIMER),a
+     145   00:4026  CD ED 4B                    call    ResetBall
+     146   00:4029  CD 7E 4C                    call    InitGraphics
+     147   00:402C  CD 75 4E                    call    UpdateSprites
+     148   00:402F                      
+     149   00:402F                      MainLoop:
+     150   00:402F                              ; Rendering is performed immediately after VBlank. Input and physics
+     151   00:402F                              ; follow, preparing state that becomes visible on the next iteration.
+     152   00:402F  76                          halt                         ; BIOS VBlank interrupt
+     153   00:4030  CD 75 4E                    call    UpdateSprites        ; update both OR planes together in VBlank
+     154   00:4033  CD 4E 4C                    call    UpdateObjectAnimation
+     155   00:4036  CD 44 40                    call    ReadControls
+     156   00:4039  CD 91 40                    call    UpdateFlipperAnimations
+     157   00:403C  CD 39 41                    call    StepBall
+     158   00:403F  CD E7 40                    call    UpdateBallAnimation
+     159   00:4042  18 EB                       jr      MainLoop
+     160   00:4044                      
+     161   00:4044                      ; -----------------------------------------------------------------------------
+     162   00:4044                      ; Input
+     163   00:4044                      ; -----------------------------------------------------------------------------
+     164   00:4044                      
+     165   00:4044                      ReadControls:
+     166   00:4044                              ; Rebuild the input state every frame instead of toggling it. This also
+     167   00:4044                              ; makes releasing a key immediately start the flipper's return frames.
+     168   00:4044  AF                          xor     a
+     169   00:4045  32 0A C0                    ld      (LEFT_ACTIVE),a
+     170   00:4048  32 0B C0                    ld      (RIGHT_ACTIVE),a
+     171   00:404B                      
+     172   00:404B                              ; GTSTCK returns an 8-direction number. Prefer cursor keys (port 0),
+     173   00:404B                              ; then read joystick port 1 when the keyboard direction is idle.
+     174   00:404B  AF                          xor     a
+     175   00:404C  CD D5 00                    call    GTSTCK
+     176   00:404F  B7                          or      a
+     177   00:4050  20 05                       jr      nz,.directionReady
+     178   00:4052  3E 01                       ld      a,1
+     179   00:4054  CD D5 00                    call    GTSTCK
+     180   00:4057                      .directionReady:
+     181   00:4057  4F                          ld      c,a
+     182   00:4058  FE 07                       cp      7                    ; left
+     183   00:405A  28 08                       jr      z,.left
+     184   00:405C  FE 08                       cp      8                    ; up-left
+     185   00:405E  28 04                       jr      z,.left
+     186   00:4060  FE 06                       cp      6                    ; down-left
+     187   00:4062  20 05                       jr      nz,.testRight
+     188   00:4064                      .left:
+     189   00:4064  3E 01                       ld      a,1
+     190   00:4066  32 0A C0                    ld      (LEFT_ACTIVE),a
+     191   00:4069                      
+     192   00:4069                      .testRight:
+     193   00:4069  79                          ld      a,c
+     194   00:406A  FE 03                       cp      3                    ; right
+     195   00:406C  28 08                       jr      z,.right
+     196   00:406E  FE 02                       cp      2                    ; up-right
+     197   00:4070  28 04                       jr      z,.right
+     198   00:4072  FE 04                       cp      4                    ; down-right
+     199   00:4074  20 05                       jr      nz,.triggers
+     200   00:4076                      .right:
+     201   00:4076  3E 01                       ld      a,1
+     202   00:4078  32 0B C0                    ld      (RIGHT_ACTIVE),a
+     203   00:407B                      
+     204   00:407B                      .triggers:
+     205   00:407B                              ; Space and joystick trigger A operate both flippers. StepBall also
+     206   00:407B                              ; treats either active flipper as the launch button while waiting.
+     207   00:407B  AF                          xor     a                    ; space bar
+     208   00:407C  CD D8 00                    call    GTTRIG
+     209   00:407F  F5                          push    af
+     210   00:4080  3E 01                       ld      a,1                  ; joystick 1 trigger A
+     211   00:4082  CD D8 00                    call    GTTRIG
+     212   00:4085  C1                          pop     bc                   ; B = space-bar result
+     213   00:4086  B0                          or      b
+     214   00:4087  C8                          ret     z
+     215   00:4088  3E 01                       ld      a,1
+     216   00:408A  32 0A C0                    ld      (LEFT_ACTIVE),a
+     217   00:408D  32 0B C0                    ld      (RIGHT_ACTIVE),a
+     218   00:4090  C9                          ret
+     219   00:4091                      
+     220   00:4091                      ; Advance one pivot-aligned bitmap frame per display frame. Pressing moves
+     221   00:4091                      ; 0->1->2; releasing plays the same source frames backwards, 2->1->0.
+     222   00:4091                      UpdateFlipperAnimations:
+     223   00:4091                              ; LEFT/RIGHT_KICK are one-frame edge signals, not held-button signals.
+     224   00:4091                              ; Physics therefore adds a strong kick only while a frame moves upward;
+     225   00:4091                              ; a ball resting on an already raised flipper merely rolls downhill.
+     226   00:4091  AF                          xor     a
+     227   00:4092  32 16 C0                    ld      (LEFT_KICK),a
+     228   00:4095  32 17 C0                    ld      (RIGHT_KICK),a
+     229   00:4098  57                          ld      d,a                  ; nonzero when at least one frame changes
+     230   00:4099                      
+     231   00:4099  3A 11 C0                    ld      a,(LEFT_FRAME)
+     232   00:409C  47                          ld      b,a
+     233   00:409D  3A 0A C0                    ld      a,(LEFT_ACTIVE)
+     234   00:40A0  B7                          or      a
+     235   00:40A1  78                          ld      a,b
+     236   00:40A2  28 10                       jr      z,.leftRelease
+     237   00:40A4  FE 02                       cp      2
+     238   00:40A6  30 12                       jr      nc,.leftStore
+     239   00:40A8  3C                          inc     a
+     240   00:40A9  16 01                       ld      d,1
+     241   00:40AB  4F                          ld      c,a
+     242   00:40AC  3E 01                       ld      a,1
+     243   00:40AE  32 16 C0                    ld      (LEFT_KICK),a
+     244   00:40B1  79                          ld      a,c
+     245   00:40B2  18 06                       jr      .leftStore
+     246   00:40B4                      .leftRelease:
+     247   00:40B4  B7                          or      a
+     248   00:40B5  28 03                       jr      z,.leftStore
+     249   00:40B7  3D                          dec     a
+     250   00:40B8  16 01                       ld      d,1
+     251   00:40BA                      .leftStore:
+     252   00:40BA  32 11 C0                    ld      (LEFT_FRAME),a
+     253   00:40BD                      
+     254   00:40BD  3A 12 C0                    ld      a,(RIGHT_FRAME)
+     255   00:40C0  47                          ld      b,a
+     256   00:40C1  3A 0B C0                    ld      a,(RIGHT_ACTIVE)
+     257   00:40C4  B7                          or      a
+     258   00:40C5  78                          ld      a,b
+     259   00:40C6  28 10                       jr      z,.rightRelease
+     260   00:40C8  FE 02                       cp      2
+     261   00:40CA  30 12                       jr      nc,.rightStore
+     262   00:40CC  3C                          inc     a
+     263   00:40CD  16 01                       ld      d,1
+     264   00:40CF  4F                          ld      c,a
+     265   00:40D0  3E 01                       ld      a,1
+     266   00:40D2  32 17 C0                    ld      (RIGHT_KICK),a
+     267   00:40D5  79                          ld      a,c
+     268   00:40D6  18 06                       jr      .rightStore
+     269   00:40D8                      .rightRelease:
+     270   00:40D8  B7                          or      a
+     271   00:40D9  28 03                       jr      z,.rightStore
+     272   00:40DB  3D                          dec     a
+     273   00:40DC  16 01                       ld      d,1
+     274   00:40DE                      .rightStore:
+     275   00:40DE  32 12 C0                    ld      (RIGHT_FRAME),a
+     276   00:40E1  7A                          ld      a,d
+     277   00:40E2  B7                          or      a
+     278   00:40E3  C8                          ret     z                    ; static frames need no repeated VRAM copy
+     279   00:40E4  C3 D3 4D                    jp      DrawFlippers
+     280   00:40E7                      
+     281   00:40E7                      ; Rotate once per three horizontal pixels travelled. Positive VX advances
+     282   00:40E7                      ; clockwise (top -> top-right -> right); negative VX plays the frames backward.
+     283   00:40E7                      ; Accumulating 8.8 distance keeps slow rolling smooth without overspinning.
+     284   00:40E7                      UpdateBallAnimation:
+     285   00:40E7                              ; Animation is distance based rather than time based. A stationary ball
+     286   00:40E7                              ; keeps its current artwork and a faster ball rotates more quickly.
+     287   00:40E7  3A 08 C0                    ld      a,(BALL_WAITING)
+     288   00:40EA  B7                          or      a
+     289   00:40EB  C0                          ret     nz
+     290   00:40EC  2A 04 C0                    ld      hl,(BALL_VX)
+     291   00:40EF  7C                          ld      a,h
+     292   00:40F0  B5                          or      l
+     293   00:40F1  C8                          ret     z
+     294   00:40F2  CB 7C                       bit     7,h
+     295   00:40F4  28 06                       jr      z,.magnitudeReady
+     296   00:40F6  AF                          xor     a
+     297   00:40F7  95                          sub     l
+     298   00:40F8  6F                          ld      l,a
+     299   00:40F9  9F                          sbc     a,a
+     300   00:40FA  94                          sub     h
+     301   00:40FB  67                          ld      h,a
+     302   00:40FC                      .magnitudeReady:
+     303   00:40FC                              ; Rolling follows the full horizontal distance travelled this frame.
+     304   00:40FC  ED 5B 14 C0                 ld      de,(BALL_ROLL_ACCUM)
+     305   00:4100  19                          add     hl,de
+     306   00:4101  7C                          ld      a,h
+     307   00:4102  FE 03                       cp      3                    ; one eighth-turn per 3 pixels
+     308   00:4104  38 21                       jr      c,.storeDistance
+     309   00:4106  11 00 03                    ld      de,0300h
+     310   00:4109  B7                          or      a
+     311   00:410A  ED 52                       sbc     hl,de
+     312   00:410C  22 14 C0                    ld      (BALL_ROLL_ACCUM),hl
+     313   00:410F                      
+     314   00:410F  2A 04 C0                    ld      hl,(BALL_VX)
+     315   00:4112  3A 13 C0                    ld      a,(BALL_FRAME)
+     316   00:4115  CB 7C                       bit     7,h
+     317   00:4117  20 07                       jr      nz,.counterClockwise
+     318   00:4119  3C                          inc     a
+     319   00:411A  E6 07                       and     7
+     320   00:411C  32 13 C0                    ld      (BALL_FRAME),a
+     321   00:411F  C9                          ret
+     322   00:4120                      .counterClockwise:
+     323   00:4120  3D                          dec     a
+     324   00:4121  E6 07                       and     7
+     325   00:4123  32 13 C0                    ld      (BALL_FRAME),a
+     326   00:4126  C9                          ret
+     327   00:4127                      .storeDistance:
+     328   00:4127  22 14 C0                    ld      (BALL_ROLL_ACCUM),hl
+     329   00:412A  C9                          ret
+     330   00:412B                      
+     331   00:412B                      ; Four collision substeps together move one complete stored velocity.
+     332   00:412B                      ; Input DE=velocity and HL=current position; output DE=velocity/4, HL kept.
+     333   00:412B                      ScaleSubstepDelta:
+     334   00:412B  E5                          push    hl
+     335   00:412C  62                          ld      h,d
+     336   00:412D  6B                          ld      l,e
+     337   00:412E  CB 2C                       sra     h
+     338   00:4130  CB 1D                       rr      l
+     339   00:4132  CB 2C                       sra     h
+     340   00:4134  CB 1D                       rr      l                   ; / 4 for one of four substeps
+     341   00:4136  EB                          ex      de,hl
+     342   00:4137  E1                          pop     hl
+     343   00:4138  C9                          ret
+     344   00:4139                      
+     345   00:4139                      ; -----------------------------------------------------------------------------
+     346   00:4139                      ; Ball simulation
+     347   00:4139                      ; -----------------------------------------------------------------------------
+     348   00:4139                      
+     349   00:4139                      StepBall:
+     350   00:4139                              ; The covered tube is a scripted path, so it bypasses gravity and all
+     351   00:4139                              ; normal collision code. It advances one path node every display frame.
+     352   00:4139  3A 0D C0                    ld      a,(BALL_IN_TUBE)
+     353   00:413C  B7                          or      a
+     354   00:413D  28 03                       jr      z,.notInTube
+     355   00:413F  C3 73 4B                    jp      StepTube
+     356   00:4142                      .notInTube:
+     357   00:4142                      
+     358   00:4142  3A 08 C0                    ld      a,(BALL_WAITING)
+     359   00:4145  B7                          or      a
+     360   00:4146  28 1A                       jr      z,.moving
+     361   00:4148                      
+     362   00:4148                              ; Any flipper/trigger input launches the ball from the right lane.
+     363   00:4148  3A 0A C0                    ld      a,(LEFT_ACTIVE)
+     364   00:414B  4F                          ld      c,a
+     365   00:414C  3A 0B C0                    ld      a,(RIGHT_ACTIVE)
+     366   00:414F  B1                          or      c
+     367   00:4150  C8                          ret     z
+     368   00:4151  AF                          xor     a
+     369   00:4152  32 08 C0                    ld      (BALL_WAITING),a
+     370   00:4155  21 C0 FE                    ld      hl,LAUNCH_VX
+     371   00:4158  22 04 C0                    ld      (BALL_VX),hl
+     372   00:415B  21 00 F9                    ld      hl,LAUNCH_VY
+     373   00:415E  22 06 C0                    ld      (BALL_VY),hl
+     374   00:4161  C9                          ret
+     375   00:4162                      
+     376   00:4162                      .moving:
+     377   00:4162                              ; BUMPER_LOCK prevents a powerful bumper from adding its impulse four
+     378   00:4162                              ; times in the four substeps of one display frame.
+     379   00:4162  3A 09 C0                    ld      a,(BUMPER_LOCK)
+     380   00:4165  B7                          or      a
+     381   00:4166  28 04                       jr      z,.gravity
+     382   00:4168  3D                          dec     a
+     383   00:4169  32 09 C0                    ld      (BUMPER_LOCK),a
+     384   00:416C                      
+     385   00:416C                      .gravity:
+     386   00:416C                              ; vy = min(vy + gravity, terminal velocity). Negative values are rising.
+     387   00:416C  2A 06 C0                    ld      hl,(BALL_VY)
+     388   00:416F  11 18 00                    ld      de,PHYSICS_GRAVITY
+     389   00:4172  19                          add     hl,de
+     390   00:4173  CB 7C                       bit     7,h
+     391   00:4175  20 08                       jr      nz,.storeVy
+     392   00:4177  7C                          ld      a,h
+     393   00:4178  FE 05                       cp      5
+     394   00:417A  38 03                       jr      c,.storeVy
+     395   00:417C  21 00 05                    ld      hl,MAX_FALL_SPEED
+     396   00:417F                      .storeVy:
+     397   00:417F  22 06 C0                    ld      (BALL_VY),hl
+     398   00:4182                      
+     399   00:4182                              ; Four smaller movement steps prevent fast balls crossing thin objects
+     400   00:4182                              ; between two collision tests. Gravity is still applied once per frame.
+     401   00:4182                              ; ScaleSubstepDelta returns one quarter velocity, so the four calls
+     402   00:4182                              ; together integrate one complete physics frame without tunnelling.
+     403   00:4182  3E 04                       ld      a,4
+     404   00:4184                      .substep:
+     405   00:4184  F5                          push    af
+     406   00:4185                      
+     407   00:4185                              ; Integrate one quarter of X and resolve the two vertical walls.
+     408   00:4185  2A 00 C0                    ld      hl,(BALL_X)
+     409   00:4188  ED 5B 04 C0                 ld      de,(BALL_VX)
+     410   00:418C  CD 2B 41                    call    ScaleSubstepDelta
+     411   00:418F  19                          add     hl,de
+     412   00:4190  22 00 C0                    ld      (BALL_X),hl
+     413   00:4193  CD 1A 42                    call    ResolveTileX
+     414   00:4196  2A 00 C0                    ld      hl,(BALL_X)
+     415   00:4199  7C                          ld      a,h
+     416   00:419A  FE 00                       cp      LEFT_WALL
+     417   00:419C  30 13                       jr      nc,.rightWall
+     418   00:419E  21 00 00                    ld      hl,LEFT_WALL*256
+     419   00:41A1  22 00 C0                    ld      (BALL_X),hl
+     420   00:41A4  2A 04 C0                    ld      hl,(BALL_VX)
+     421   00:41A7  CB 7C                       bit     7,h
+     422   00:41A9  C4 D0 43                    call    nz,NegateAndDamp
+     423   00:41AC  22 04 C0                    ld      (BALL_VX),hl
+     424   00:41AF  18 15                       jr      .moveY
+     425   00:41B1                      
+     426   00:41B1                      .rightWall:
+     427   00:41B1  FE F1                       cp      RIGHT_WALL+1
+     428   00:41B3  38 11                       jr      c,.moveY
+     429   00:41B5  21 00 F0                    ld      hl,RIGHT_WALL*256
+     430   00:41B8  22 00 C0                    ld      (BALL_X),hl
+     431   00:41BB  2A 04 C0                    ld      hl,(BALL_VX)
+     432   00:41BE  CB 7C                       bit     7,h
+     433   00:41C0  CC D0 43                    call    z,NegateAndDamp
+     434   00:41C3  22 04 C0                    ld      (BALL_VX),hl
+     435   00:41C6                      
+     436   00:41C6                      .moveY:
+     437   00:41C6  2A 02 C0                    ld      hl,(BALL_Y)
+     438   00:41C9  ED 5B 06 C0                 ld      de,(BALL_VY)
+     439   00:41CD  CD 2B 41                    call    ScaleSubstepDelta
+     440   00:41D0  19                          add     hl,de
+     441   00:41D1  22 02 C0                    ld      (BALL_Y),hl
+     442   00:41D4  CD 79 42                    call    ResolveTileY
+     443   00:41D7  2A 02 C0                    ld      hl,(BALL_Y)
+     444   00:41DA                      
+     445   00:41DA                              ; Emergency ceiling bound in case malformed map data leaves a gap.
+     446   00:41DA  7C                          ld      a,h
+     447   00:41DB  FE 00                       cp      TOP_WALL
+     448   00:41DD  30 11                       jr      nc,.objects
+     449   00:41DF  21 00 00                    ld      hl,TOP_WALL*256
+     450   00:41E2  22 02 C0                    ld      (BALL_Y),hl
+     451   00:41E5  2A 06 C0                    ld      hl,(BALL_VY)
+     452   00:41E8  CB 7C                       bit     7,h
+     453   00:41EA  C4 D0 43                    call    nz,NegateAndDamp
+     454   00:41ED  22 06 C0                    ld      (BALL_VY),hl
+     455   00:41F0                      
+     456   00:41F0                      .objects:
+     457   00:41F0                              ; Collision order is deliberate: static geometry first, authored Tiled
+     458   00:41F0                              ; objects second, moving flippers last. A tube hit takes ownership and
+     459   00:41F0                              ; aborts the remaining checks. A drain reset does the same.
+     460   00:41F0  AF                          xor     a
+     461   00:41F1  32 3F C0                    ld      (OBJECT_CONTACT),a
+     462   00:41F4  CD F8 43                    call    CheckMapPolygons
+     463   00:41F7  3A 3F C0                    ld      a,(OBJECT_CONTACT)
+     464   00:41FA  B7                          or      a
+     465   00:41FB  20 0C                       jr      nz,.lowerTable        ; never resolve one overlap as bumper + flipper
+     466   00:41FD  CD 3D 45                    call    CheckMapCircles
+     467   00:4200  3A 0D C0                    ld      a,(BALL_IN_TUBE)
+     468   00:4203  B7                          or      a
+     469   00:4204  20 12                       jr      nz,.endStepBall
+     470   00:4206  CD D7 48                    call    CheckFlippers
+     471   00:4209                      .lowerTable:
+     472   00:4209  CD E4 4B                    call    CheckLowerTable
+     473   00:420C  3A 08 C0                    ld      a,(BALL_WAITING)
+     474   00:420F  B7                          or      a
+     475   00:4210  20 06                       jr      nz,.endStepBall
+     476   00:4212                      
+     477   00:4212  F1                          pop     af
+     478   00:4213  3D                          dec     a
+     479   00:4214  C2 84 41                    jp      nz,.substep
+     480   00:4217  C9                          ret
+     481   00:4218                      
+     482   00:4218                      .endStepBall:
+     483   00:4218  F1                          pop     af
+     484   00:4219  C9                          ret
+     485   00:421A                      
+     486   00:421A                      ; Static collision_shape values generated from maps/pinball.tsx:
+     487   00:421A                      ;   0 empty, 1 solid, 2 ceiling, 3 floor, 4 left wall, 5 right wall,
+     488   00:421A                      ;   6 slash diagonal and 7 backslash diagonal. Shape 8 is compiled into a
+     489   00:421A                      ;   circle object by the build tool and therefore becomes 0 in CollisionMap.
+     490   00:421A                      ;
+     491   00:421A                      ; Resolve horizontal movement against the leading point of the ball. Shape 1
+     492   00:421A                      ; is solid from every side; shape 4 is the left table boundary and shape 5 the
+     493   00:421A                      ; right boundary. The 4 physics substeps keep this point test from tunnelling.
+     494   00:421A                      ResolveTileX:
+     495   00:421A  2A 04 C0                    ld      hl,(BALL_VX)
+     496   00:421D  7C                          ld      a,h
+     497   00:421E  B5                          or      l
+     498   00:421F  C8                          ret     z
+     499   00:4220  CB 7C                       bit     7,h
+     500   00:4222  20 2B                       jr      nz,.movingLeft
+     501   00:4224                      
+     502   00:4224  3A 01 C0                    ld      a,(BALL_X+1)
+     503   00:4227  C6 0F                       add     a,15                 ; rightmost circle point
+     504   00:4229  47                          ld      b,a
+     505   00:422A  3A 03 C0                    ld      a,(BALL_Y+1)
+     506   00:422D  C6 08                       add     a,8
+     507   00:422F  4F                          ld      c,a
+     508   00:4230  CD AA 43                    call    GetCollisionShape
+     509   00:4233  FE 01                       cp      1
+     510   00:4235  28 03                       jr      z,.hitRightWall
+     511   00:4237  FE 05                       cp      5
+     512   00:4239  C0                          ret     nz
+     513   00:423A                      .hitRightWall:
+     514   00:423A                              ; Snap the sprite just outside the occupied 8-pixel tile, then reflect
+     515   00:423A                              ; only the horizontal velocity. NegateAndDamp retains 75% energy.
+     516   00:423A  78                          ld      a,b
+     517   00:423B  E6 F8                       and     0f8h
+     518   00:423D  D6 10                       sub     16
+     519   00:423F  67                          ld      h,a
+     520   00:4240  2E 00                       ld      l,0
+     521   00:4242  22 00 C0                    ld      (BALL_X),hl
+     522   00:4245  2A 04 C0                    ld      hl,(BALL_VX)
+     523   00:4248  CD D0 43                    call    NegateAndDamp
+     524   00:424B  22 04 C0                    ld      (BALL_VX),hl
+     525   00:424E  C9                          ret
+     526   00:424F                      
+     527   00:424F                      .movingLeft:
+     528   00:424F  3A 01 C0                    ld      a,(BALL_X+1)
+     529   00:4252  3C                          inc     a                    ; leftmost circle point
+     530   00:4253  47                          ld      b,a
+     531   00:4254  3A 03 C0                    ld      a,(BALL_Y+1)
+     532   00:4257  C6 08                       add     a,8
+     533   00:4259  4F                          ld      c,a
+     534   00:425A  CD AA 43                    call    GetCollisionShape
+     535   00:425D  FE 01                       cp      1
+     536   00:425F  28 03                       jr      z,.hitLeftWall
+     537   00:4261  FE 04                       cp      4
+     538   00:4263  C0                          ret     nz
+     539   00:4264                      .hitLeftWall:
+     540   00:4264  78                          ld      a,b
+     541   00:4265  E6 F8                       and     0f8h
+     542   00:4267  C6 07                       add     a,7
+     543   00:4269  67                          ld      h,a
+     544   00:426A  2E 00                       ld      l,0
+     545   00:426C  22 00 C0                    ld      (BALL_X),hl
+     546   00:426F  2A 04 C0                    ld      hl,(BALL_VX)
+     547   00:4272  CD D0 43                    call    NegateAndDamp
+     548   00:4275  22 04 C0                    ld      (BALL_VX),hl
+     549   00:4278  C9                          ret
+     550   00:4279                      
+     551   00:4279                      ; Vertical equivalent. Shape 2 is the upper table boundary, shape 3 the lower
+     552   00:4279                      ; surface. Diagonal types are resolved against their 8-pixel height function.
+     553   00:4279                      ResolveTileY:
+     554   00:4279  2A 06 C0                    ld      hl,(BALL_VY)
+     555   00:427C  7C                          ld      a,h
+     556   00:427D  B5                          or      l
+     557   00:427E  C8                          ret     z
+     558   00:427F  CB 7C                       bit     7,h
+     559   00:4281  20 37                       jr      nz,.movingUp
+     560   00:4283                      
+     561   00:4283  3A 01 C0                    ld      a,(BALL_X+1)
+     562   00:4286  C6 08                       add     a,8
+     563   00:4288  47                          ld      b,a
+     564   00:4289  3A 03 C0                    ld      a,(BALL_Y+1)
+     565   00:428C  C6 0F                       add     a,15                 ; bottom circle point
+     566   00:428E  4F                          ld      c,a
+     567   00:428F  CD AA 43                    call    GetCollisionShape
+     568   00:4292  FE 01                       cp      1
+     569   00:4294  28 0F                       jr      z,.hitFloor
+     570   00:4296  FE 03                       cp      3
+     571   00:4298  28 0B                       jr      z,.hitFloor
+     572   00:429A  FE 06                       cp      6
+     573   00:429C  CA 0E 43                    jp      z,ResolveSlopeFloor
+     574   00:429F  FE 07                       cp      7
+     575   00:42A1  CA 0E 43                    jp      z,ResolveSlopeFloor
+     576   00:42A4  C9                          ret
+     577   00:42A5                      .hitFloor:
+     578   00:42A5                              ; BALL_Y is the sprite top-left. Subtracting 16 places its bottom edge
+     579   00:42A5                              ; exactly on the top of the contacted tile row.
+     580   00:42A5  79                          ld      a,c
+     581   00:42A6  E6 F8                       and     0f8h
+     582   00:42A8  D6 10                       sub     16
+     583   00:42AA  67                          ld      h,a
+     584   00:42AB  2E 00                       ld      l,0
+     585   00:42AD  22 02 C0                    ld      (BALL_Y),hl
+     586   00:42B0  2A 06 C0                    ld      hl,(BALL_VY)
+     587   00:42B3  CD D0 43                    call    NegateAndDamp
+     588   00:42B6  22 06 C0                    ld      (BALL_VY),hl
+     589   00:42B9  C9                          ret
+     590   00:42BA                      
+     591   00:42BA                      .movingUp:
+     592   00:42BA                              ; Curved/diagonal ceilings are touched by a top corner before the
+     593   00:42BA                              ; centre reaches a flat ceiling. This lets the launcher curve turn
+     594   00:42BA                              ; upward velocity into a strong horizontal component.
+     595   00:42BA  3A 03 C0                    ld      a,(BALL_Y+1)
+     596   00:42BD  3C                          inc     a
+     597   00:42BE  4F                          ld      c,a
+     598   00:42BF  3A 01 C0                    ld      a,(BALL_X+1)
+     599   00:42C2  C6 0F                       add     a,15
+     600   00:42C4  47                          ld      b,a
+     601   00:42C5  CD AA 43                    call    GetCollisionShape
+     602   00:42C8  FE 06                       cp      6
+     603   00:42CA  CA 5C 43                    jp      z,ResolveSlopeCeiling
+     604   00:42CD  FE 07                       cp      7
+     605   00:42CF  CA 5C 43                    jp      z,ResolveSlopeCeiling
+     606   00:42D2                      
+     607   00:42D2  3A 01 C0                    ld      a,(BALL_X+1)
+     608   00:42D5  3C                          inc     a
+     609   00:42D6  47                          ld      b,a
+     610   00:42D7  CD AA 43                    call    GetCollisionShape
+     611   00:42DA  FE 06                       cp      6
+     612   00:42DC  CA 5C 43                    jp      z,ResolveSlopeCeiling
+     613   00:42DF  FE 07                       cp      7
+     614   00:42E1  CA 5C 43                    jp      z,ResolveSlopeCeiling
+     615   00:42E4                      
+     616   00:42E4  3A 01 C0                    ld      a,(BALL_X+1)
+     617   00:42E7  C6 08                       add     a,8
+     618   00:42E9  47                          ld      b,a
+     619   00:42EA  3A 03 C0                    ld      a,(BALL_Y+1)
+     620   00:42ED  3C                          inc     a                    ; top circle point
+     621   00:42EE  4F                          ld      c,a
+     622   00:42EF  CD AA 43                    call    GetCollisionShape
+     623   00:42F2  FE 01                       cp      1
+     624   00:42F4  28 03                       jr      z,.hitCeiling
+     625   00:42F6  FE 02                       cp      2
+     626   00:42F8  C0                          ret     nz
+     627   00:42F9                      .hitCeiling:
+     628   00:42F9  79                          ld      a,c
+     629   00:42FA  E6 F8                       and     0f8h
+     630   00:42FC  C6 07                       add     a,7
+     631   00:42FE  67                          ld      h,a
+     632   00:42FF  2E 00                       ld      l,0
+     633   00:4301  22 02 C0                    ld      (BALL_Y),hl
+     634   00:4304  2A 06 C0                    ld      hl,(BALL_VY)
+     635   00:4307  CD D0 43                    call    NegateAndDamp
+     636   00:430A  22 06 C0                    ld      (BALL_VY),hl
+     637   00:430D  C9                          ret
+     638   00:430E                      
+     639   00:430E                      ; A=6 for '/', A=7 for '\\'; B/C are the sampled pixel coordinates.
+     640   00:430E                      ResolveSlopeFloor:
+     641   00:430E                              ; Each diagonal tile is an exact one-pixel height function. Comparing
+     642   00:430E                              ; local Y with that height avoids treating its transparent half as solid.
+     643   00:430E  32 0C C0                    ld      (BALL_SIDE),a
+     644   00:4311  78                          ld      a,b
+     645   00:4312  E6 07                       and     7
+     646   00:4314  57                          ld      d,a                  ; local X
+     647   00:4315  3A 0C C0                    ld      a,(BALL_SIDE)
+     648   00:4318  FE 07                       cp      7
+     649   00:431A  7A                          ld      a,d
+     650   00:431B  28 03                       jr      z,.surfaceReady
+     651   00:431D  3E 07                       ld      a,7
+     652   00:431F  92                          sub     d                    ; '/' height = 7-localX
+     653   00:4320                      .surfaceReady:
+     654   00:4320  57                          ld      d,a                  ; local surface Y
+     655   00:4321  79                          ld      a,c
+     656   00:4322  E6 07                       and     7
+     657   00:4324  BA                          cp      d
+     658   00:4325  D8                          ret     c                    ; bottom point has not reached the line
+     659   00:4326                      
+     660   00:4326  79                          ld      a,c
+     661   00:4327  E6 F8                       and     0f8h
+     662   00:4329  82                          add     a,d
+     663   00:432A  D6 10                       sub     16
+     664   00:432C  67                          ld      h,a
+     665   00:432D  2E 00                       ld      l,0
+     666   00:432F  22 02 C0                    ld      (BALL_Y),hl
+     667   00:4332                      
+     668   00:4332                              ; Reflection against a 45-degree line swaps X/Y velocity components.
+     669   00:4332                              ; Their signs depend on which of the two diagonals was touched.
+     670   00:4332  2A 04 C0                    ld      hl,(BALL_VX)
+     671   00:4335  E5                          push    hl
+     672   00:4336  3A 0C C0                    ld      a,(BALL_SIDE)
+     673   00:4339  FE 07                       cp      7
+     674   00:433B  2A 06 C0                    ld      hl,(BALL_VY)
+     675   00:433E  28 0E                       jr      z,.backslash
+     676   00:4340  CD D0 43                    call    NegateAndDamp         ; '/' : vx=-vy, vy=-vx
+     677   00:4343  22 04 C0                    ld      (BALL_VX),hl
+     678   00:4346  E1                          pop     hl
+     679   00:4347  CD D0 43                    call    NegateAndDamp
+     680   00:434A  22 06 C0                    ld      (BALL_VY),hl
+     681   00:434D  C9                          ret
+     682   00:434E                      .backslash:
+     683   00:434E  CD E7 43                    call    DampHL                ; '\\' : vx=vy, vy=vx
+     684   00:4351  22 04 C0                    ld      (BALL_VX),hl
+     685   00:4354  E1                          pop     hl
+     686   00:4355  CD E7 43                    call    DampHL
+     687   00:4358  22 06 C0                    ld      (BALL_VY),hl
+     688   00:435B  C9                          ret
+     689   00:435C                      
+     690   00:435C                      ; Upward counterpart for diagonal ceilings. A=shape and B/C are the top-corner
+     691   00:435C                      ; sample. Reflection is identical, but the ball is separated below the line.
+     692   00:435C                      ResolveSlopeCeiling:
+     693   00:435C  32 0C C0                    ld      (BALL_SIDE),a
+     694   00:435F  78                          ld      a,b
+     695   00:4360  E6 07                       and     7
+     696   00:4362  57                          ld      d,a
+     697   00:4363  3A 0C C0                    ld      a,(BALL_SIDE)
+     698   00:4366  FE 07                       cp      7
+     699   00:4368  7A                          ld      a,d
+     700   00:4369  28 03                       jr      z,.surfaceReady
+     701   00:436B  3E 07                       ld      a,7
+     702   00:436D  92                          sub     d
+     703   00:436E                      .surfaceReady:
+     704   00:436E  57                          ld      d,a
+     705   00:436F  79                          ld      a,c
+     706   00:4370  E6 07                       and     7
+     707   00:4372  BA                          cp      d
+     708   00:4373  38 01                       jr      c,.hit
+     709   00:4375  C0                          ret     nz
+     710   00:4376                      .hit:
+     711   00:4376  79                          ld      a,c
+     712   00:4377  E6 F8                       and     0f8h
+     713   00:4379  82                          add     a,d
+     714   00:437A  67                          ld      h,a
+     715   00:437B  2E 00                       ld      l,0
+     716   00:437D  22 02 C0                    ld      (BALL_Y),hl
+     717   00:4380                      
+     718   00:4380  2A 04 C0                    ld      hl,(BALL_VX)
+     719   00:4383  E5                          push    hl
+     720   00:4384  3A 0C C0                    ld      a,(BALL_SIDE)
+     721   00:4387  FE 07                       cp      7
+     722   00:4389  2A 06 C0                    ld      hl,(BALL_VY)
+     723   00:438C  28 0E                       jr      z,.backslash
+     724   00:438E  CD D0 43                    call    NegateAndDamp         ; '/' : vx=-vy, vy=-vx
+     725   00:4391  22 04 C0                    ld      (BALL_VX),hl
+     726   00:4394  E1                          pop     hl
+     727   00:4395  CD D0 43                    call    NegateAndDamp
+     728   00:4398  22 06 C0                    ld      (BALL_VY),hl
+     729   00:439B  C9                          ret
+     730   00:439C                      .backslash:
+     731   00:439C  CD E7 43                    call    DampHL                ; '\\' : vx=vy, vy=vx
+     732   00:439F  22 04 C0                    ld      (BALL_VX),hl
+     733   00:43A2  E1                          pop     hl
+     734   00:43A3  CD E7 43                    call    DampHL
+     735   00:43A6  22 06 C0                    ld      (BALL_VY),hl
+     736   00:43A9  C9                          ret
+     737   00:43AA                      
+     738   00:43AA                      ; B=pixel X, C=pixel Y. Return A=compiled collision shape, or zero below the
+     739   00:43AA                      ; 32x24 map. Tile index = (Y>>3)*32 + (X>>3).
+     740   00:43AA                      GetCollisionShape:
+     741   00:43AA                              ; A row contains 32 bytes, hence (Y/8)*32. X/8 selects the column.
+     742   00:43AA                              ; Shifts and additions are cheaper than a general Z80 multiplication.
+     743   00:43AA  79                          ld      a,c
+     744   00:43AB  FE C0                       cp      192
+     745   00:43AD  30 1F                       jr      nc,.empty
+     746   00:43AF  CB 3F                       srl     a
+     747   00:43B1  CB 3F                       srl     a
+     748   00:43B3  CB 3F                       srl     a
+     749   00:43B5  6F                          ld      l,a
+     750   00:43B6  26 00                       ld      h,0
+     751   00:43B8  29                          add     hl,hl
+     752   00:43B9  29                          add     hl,hl
+     753   00:43BA  29                          add     hl,hl
+     754   00:43BB  29                          add     hl,hl
+     755   00:43BC  29                          add     hl,hl
+     756   00:43BD  78                          ld      a,b
+     757   00:43BE  CB 3F                       srl     a
+     758   00:43C0  CB 3F                       srl     a
+     759   00:43C2  CB 3F                       srl     a
+     760   00:43C4  5F                          ld      e,a
+     761   00:43C5  16 00                       ld      d,0
+     762   00:43C7  19                          add     hl,de
+     763   00:43C8  11 4D 71                    ld      de,CollisionMap
+     764   00:43CB  19                          add     hl,de
+     765   00:43CC  7E                          ld      a,(hl)
+     766   00:43CD  C9                          ret
+     767   00:43CE                      .empty:
+     768   00:43CE  AF                          xor     a
+     769   00:43CF  C9                          ret
+     770   00:43D0                      
+     771   00:43D0                      ; Return HL = -(HL * 3/4). All table tiles share this material response.
+     772   00:43D0                      NegateAndDamp:
+     773   00:43D0  AF                          xor     a
+     774   00:43D1  95                          sub     l
+     775   00:43D2  6F                          ld      l,a
+     776   00:43D3  9F                          sbc     a,a
+     777   00:43D4  94                          sub     h
+     778   00:43D5  67                          ld      h,a                  ; HL = -HL
+     779   00:43D6                      
+     780   00:43D6  44                          ld      b,h
+     781   00:43D7  4D                          ld      c,l                  ; BC = reflected velocity
+     782   00:43D8  CB 2C                       sra     h
+     783   00:43DA  CB 1D                       rr      l
+     784   00:43DC  CB 2C                       sra     h
+     785   00:43DE  CB 1D                       rr      l                    ; HL = reflected velocity / 4
+     786   00:43E0  EB                          ex      de,hl
+     787   00:43E1  60                          ld      h,b
+     788   00:43E2  69                          ld      l,c
+     789   00:43E3  B7                          or      a
+     790   00:43E4  ED 52                       sbc     hl,de                ; retain 3/4 of the energy
+     791   00:43E6  C9                          ret
+     792   00:43E7                      
+     793   00:43E7                      ; Return HL = HL * 3/4 while preserving its sign.
+     794   00:43E7                      DampHL:
+     795   00:43E7  44                          ld      b,h
+     796   00:43E8  4D                          ld      c,l
+     797   00:43E9  CB 2C                       sra     h
+     798   00:43EB  CB 1D                       rr      l
+     799   00:43ED  CB 2C                       sra     h
+     800   00:43EF  CB 1D                       rr      l
+     801   00:43F1  EB                          ex      de,hl
+     802   00:43F2  60                          ld      h,b
+     803   00:43F3  69                          ld      l,c
+     804   00:43F4  B7                          or      a
+     805   00:43F5  ED 52                       sbc     hl,de                ; retain 3/4 of the energy
+     806   00:43F7  C9                          ret
+     807   00:43F8                      
+     808   00:43F8                      ; -----------------------------------------------------------------------------
+     809   00:43F8                      ; Tiled object collisions
+     810   00:43F8                      ; -----------------------------------------------------------------------------
+     811   00:43F8                      ;
+     812   00:43F8                      ; Objects live separately from the static collision tiles. The build script
+     813   00:43F8                      ; reads ellipses and polygons from the PinballObjects layer and emits compact
+     814   00:43F8                      ; records. This allows differently sized objects without adding tile types.
+     815   00:43F8                      ;
+     816   00:43F8                      ; Polygon bumpers are compiled to small per-pixel fields. Each four-bit value
+     817   00:43F8                      ; contains normal+1; zero means no physical contact. Two pixels share a byte.
+     818   00:43F8                      CheckMapPolygons:
+     819   00:43F8                              ; Byte zero is the object count. IX starts at the first variable-size
+     820   00:43F8                              ; record; its leading size word is used to advance to the next record.
+     821   00:43F8  CD EF 44                    call    MaybeRearmLastPolygon
+     822   00:43FB  DD 21 01 80                 ld      ix,PolygonObjects+1
+     823   00:43FF  3A 00 80                    ld      a,(PolygonObjects)
+     824   00:4402  B7                          or      a
+     825   00:4403  C8                          ret     z
+     826   00:4404  47                          ld      b,a
+     827   00:4405                      .loop:
+     828   00:4405  C5                          push    bc
+     829   00:4406  CD 91 44                    call    LookupPolygonField
+     830   00:4409  C1                          pop     bc
+     831   00:440A  30 78                       jr      nc,.next
+     832   00:440C  32 21 C0                    ld      (POLY_FIELD_VALUE),a
+     833   00:440F  E6 0F                       and     00fh
+     834   00:4411  28 71                       jr      z,.next               ; release margin, not a collision
+     835   00:4413  3D                          dec     a
+     836   00:4414  32 0C C0                    ld      (BALL_SIDE),a
+     837   00:4417                              ; The expanded fields of nearby objects may overlap (for example the
+     838   00:4417                              ; new upper-left flipper and bumper1). Claim the current substep so a
+     839   00:4417                              ; second collider cannot immediately undo this bumper's response.
+     840   00:4417  3E 01                       ld      a,1
+     841   00:4419  32 3F C0                    ld      (OBJECT_CONTACT),a
+     842   00:441C                              ; Polygon fields already include the seven-pixel ball radius. The field
+     843   00:441C                              ; therefore answers a ball-centre query directly and supplies a normal.
+     844   00:441C  CD EC 46                    call    SeparateCircleOnePixel
+     845   00:441F  DD 7E 03                    ld      a,(ix+3)
+     846   00:4422  C6 07                       add     a,7
+     847   00:4424  47                          ld      b,a
+     848   00:4425  DD 7E 04                    ld      a,(ix+4)
+     849   00:4428  C6 07                       add     a,7
+     850   00:442A  4F                          ld      c,a
+     851   00:442B  DD 7E 0A                    ld      a,(ix+10)
+     852   00:442E  CD 33 4C                    call    QueueObjectAnimation
+     853   00:4431                      
+     854   00:4431                              ; A post/type 0 or kick 0 uses reflection only. An active bumper first
+     855   00:4431                              ; reflects the incoming component, then adds an outward impulse.
+     856   00:4431  DD 7E 02                    ld      a,(ix+2)
+     857   00:4434  B7                          or      a
+     858   00:4435  28 4A                       jr      z,.passive
+     859   00:4437  DD 7E 07                    ld      a,(ix+7)
+     860   00:443A  B7                          or      a
+     861   00:443B  28 44                       jr      z,.passive
+     862   00:443D  3A 09 C0                    ld      a,(BUMPER_LOCK)
+     863   00:4440  B7                          or      a
+     864   00:4441  20 3E                       jr      nz,.passive
+     865   00:4443  3A 1F C0                    ld      a,(LAST_BUMPER_KIND)
+     866   00:4446  FE 02                       cp      2
+     867   00:4448  20 0B                       jr      nz,.newActive
+     868   00:444A  DD E5                       push    ix
+     869   00:444C  D1                          pop     de
+     870   00:444D  2A 1B C0                    ld      hl,(LAST_BUMPER_PTR)
+     871   00:4450  B7                          or      a
+     872   00:4451  ED 52                       sbc     hl,de
+     873   00:4453  28 2C                       jr      z,.passive
+     874   00:4455                      .newActive:
+     875   00:4455                              ; Kick property 1/2/3+ maps to 2/3/4 internal pixels per frame. Keeping
+     876   00:4455                              ; this mapping here makes Tiled properties simple integer values.
+     877   00:4455  CD 43 47                    call    PassiveCircleResponse
+     878   00:4458  DD 7E 07                    ld      a,(ix+7)
+     879   00:445B  FE 02                       cp      2
+     880   00:445D  21 00 02                    ld      hl,0200h
+     881   00:4460  38 08                       jr      c,.kickReady
+     882   00:4462  21 00 03                    ld      hl,0300h
+     883   00:4465  28 03                       jr      z,.kickReady
+     884   00:4467  21 00 04                    ld      hl,0400h
+     885   00:446A                      .kickReady:
+     886   00:446A  CD FE 47                    call    AddCircleImpulse
+     887   00:446D  CD 5B 48                    call    ClampBallVelocity
+     888   00:4470  DD E5                       push    ix
+     889   00:4472  E1                          pop     hl
+     890   00:4473  22 1B C0                    ld      (LAST_BUMPER_PTR),hl
+     891   00:4476  3E 02                       ld      a,2
+     892   00:4478  32 1F C0                    ld      (LAST_BUMPER_KIND),a
+     893   00:447B  3E 0C                       ld      a,12
+     894   00:447D  32 09 C0                    ld      (BUMPER_LOCK),a
+     895   00:4480  C9                          ret
+     896   00:4481                      .passive:
+     897   00:4481  C3 43 47                    jp      PassiveCircleResponse
+     898   00:4484                      .next:
+     899   00:4484  DD 5E 00                    ld      e,(ix+0)
+     900   00:4487  DD 56 01                    ld      d,(ix+1)
+     901   00:448A  DD 19                       add     ix,de
+     902   00:448C  05                          dec     b
+     903   00:448D  C2 05 44                    jp      nz,.loop
+     904   00:4490  C9                          ret
+     905   00:4491                      
+     906   00:4491                      ; IX points at a polygon record:
+     907   00:4491                      ;   +0 size low, +1 size high, +2 type
+     908   00:4491                      ;   +3 field X, +4 field Y, +5 width, +6 height
+     909   00:4491                      ;   +7 kick, +8/+9 score, +10 animation-atlas X
+     910   00:4491                      ;   +11... packed collision nibbles in row-major order
+     911   00:4491                      ; Return carry set and A=field byte when the ball centre lies inside the field.
+     912   00:4491                      LookupPolygonField:
+     913   00:4491  3A 01 C0                    ld      a,(BALL_X+1)
+     914   00:4494  C6 08                       add     a,8
+     915   00:4496  DD 96 03                    sub     (ix+3)
+     916   00:4499  38 52                       jr      c,.outside
+     917   00:449B  DD BE 05                    cp      (ix+5)
+     918   00:449E  30 4D                       jr      nc,.outside
+     919   00:44A0  32 20 C0                    ld      (POLY_LOCAL_X),a
+     920   00:44A3                      
+     921   00:44A3  3A 03 C0                    ld      a,(BALL_Y+1)
+     922   00:44A6  C6 08                       add     a,8
+     923   00:44A8  DD 96 04                    sub     (ix+4)
+     924   00:44AB  38 40                       jr      c,.outside
+     925   00:44AD  DD BE 06                    cp      (ix+6)
+     926   00:44B0  30 3B                       jr      nc,.outside
+     927   00:44B2  4F                          ld      c,a                   ; local Y
+     928   00:44B3  DD 5E 05                    ld      e,(ix+5)              ; row width
+     929   00:44B6  16 00                       ld      d,0
+     930   00:44B8  21 00 00                    ld      hl,0
+     931   00:44BB  79                          ld      a,c
+     932   00:44BC  B7                          or      a
+     933   00:44BD  28 04                       jr      z,.rowReady
+     934   00:44BF                      .rowLoop:
+     935   00:44BF  19                          add     hl,de
+     936   00:44C0  3D                          dec     a
+     937   00:44C1  20 FC                       jr      nz,.rowLoop
+     938   00:44C3                      .rowReady:
+     939   00:44C3                              ; Linear pixel index = localY*width + localX. Division by two selects
+     940   00:44C3                              ; the packed byte; index bit zero selects its low or high nibble.
+     941   00:44C3  3A 20 C0                    ld      a,(POLY_LOCAL_X)
+     942   00:44C6  5F                          ld      e,a
+     943   00:44C7  16 00                       ld      d,0
+     944   00:44C9  19                          add     hl,de
+     945   00:44CA  7D                          ld      a,l
+     946   00:44CB  E6 01                       and     1
+     947   00:44CD  32 21 C0                    ld      (POLY_FIELD_VALUE),a  ; select low/even or high/odd nibble
+     948   00:44D0  CB 3C                       srl     h
+     949   00:44D2  CB 1D                       rr      l
+     950   00:44D4  DD E5                       push    ix
+     951   00:44D6  D1                          pop     de
+     952   00:44D7  19                          add     hl,de
+     953   00:44D8  11 0B 00                    ld      de,11
+     954   00:44DB  19                          add     hl,de
+     955   00:44DC  7E                          ld      a,(hl)
+     956   00:44DD  4F                          ld      c,a
+     957   00:44DE  3A 21 C0                    ld      a,(POLY_FIELD_VALUE)
+     958   00:44E1  B7                          or      a
+     959   00:44E2  79                          ld      a,c
+     960   00:44E3  28 04                       jr      z,.lowNibble
+     961   00:44E5  0F                          rrca
+     962   00:44E6  0F                          rrca
+     963   00:44E7  0F                          rrca
+     964   00:44E8  0F                          rrca
+     965   00:44E9                      .lowNibble:
+     966   00:44E9  E6 0F                       and     00fh
+     967   00:44EB  37                          scf
+     968   00:44EC  C9                          ret
+     969   00:44ED                      .outside:
+     970   00:44ED  B7                          or      a                     ; clear carry
+     971   00:44EE  C9                          ret
+     972   00:44EF                      
+     973   00:44EF                      MaybeRearmLastPolygon:
+     974   00:44EF                              ; A fired bumper is latched until the ball has genuinely left it. This
+     975   00:44EF                              ; avoids another kick when position correction leaves a one-pixel overlap.
+     976   00:44EF  3A 1F C0                    ld      a,(LAST_BUMPER_KIND)
+     977   00:44F2  FE 02                       cp      2
+     978   00:44F4  C0                          ret     nz
+     979   00:44F5  DD 2A 1B C0                 ld      ix,(LAST_BUMPER_PTR)
+     980   00:44F9                              ; Keep the latch inside the field bounding box plus four pixels. The
+     981   00:44F9                              ; exact collision remains polygon-shaped; only rearming is rectangular.
+     982   00:44F9  3A 01 C0                    ld      a,(BALL_X+1)
+     983   00:44FC  C6 08                       add     a,8
+     984   00:44FE  4F                          ld      c,a
+     985   00:44FF  DD 7E 03                    ld      a,(ix+3)
+     986   00:4502  D6 04                       sub     4
+     987   00:4504  57                          ld      d,a
+     988   00:4505  79                          ld      a,c
+     989   00:4506  BA                          cp      d
+     990   00:4507  38 29                       jr      c,.rearm
+     991   00:4509  DD 7E 03                    ld      a,(ix+3)
+     992   00:450C  DD 86 05                    add     a,(ix+5)
+     993   00:450F  C6 04                       add     a,4
+     994   00:4511  57                          ld      d,a
+     995   00:4512  79                          ld      a,c
+     996   00:4513  BA                          cp      d
+     997   00:4514  30 1C                       jr      nc,.rearm
+     998   00:4516  3A 03 C0                    ld      a,(BALL_Y+1)
+     999   00:4519  C6 08                       add     a,8
+    1000   00:451B  4F                          ld      c,a
+    1001   00:451C  DD 7E 04                    ld      a,(ix+4)
+    1002   00:451F  D6 04                       sub     4
+    1003   00:4521  57                          ld      d,a
+    1004   00:4522  79                          ld      a,c
+    1005   00:4523  BA                          cp      d
+    1006   00:4524  38 0C                       jr      c,.rearm
+    1007   00:4526  DD 7E 04                    ld      a,(ix+4)
+    1008   00:4529  DD 86 06                    add     a,(ix+6)
+    1009   00:452C  C6 04                       add     a,4
+    1010   00:452E  57                          ld      d,a
+    1011   00:452F  79                          ld      a,c
+    1012   00:4530  BA                          cp      d
+    1013   00:4531  D8                          ret     c                     ; still inside the release rectangle
+    1014   00:4532                      .rearm:
+    1015   00:4532  21 00 00                    ld      hl,0
+    1016   00:4535  22 1B C0                    ld      (LAST_BUMPER_PTR),hl
+    1017   00:4538  AF                          xor     a
+    1018   00:4539  32 1F C0                    ld      (LAST_BUMPER_KIND),a
+    1019   00:453C  C9                          ret
+    1020   00:453D                      
+    1021   00:453D                      ; Tiled PinballObjects. Each eight-byte record is:
+    1022   00:453D                      ; type, centre X, centre Y, radius, kick, score low/high, animation-atlas X.
+    1023   00:453D                      ; Type 0 is a passive post; type 1 is a bumper (kick 0 is also passive).
+    1024   00:453D                      CheckMapCircles:
+    1025   00:453D  CD 30 46                    call    MaybeRearmLastBumper
+    1026   00:4540  DD 21 4E 74                 ld      ix,CircleObjects+1
+    1027   00:4544  3A 4D 74                    ld      a,(CircleObjects)
+    1028   00:4547  B7                          or      a
+    1029   00:4548  C8                          ret     z
+    1030   00:4549                      .haveObjects:
+    1031   00:4549  47                          ld      b,a
+    1032   00:454A                      .loop:
+    1033   00:454A                              ; Broad phase: compare absolute X/Y distances with the combined radius.
+    1034   00:454A                              ; Only candidates inside that square need the more expensive squares.
+    1035   00:454A  DD 7E 03                    ld      a,(ix+3)
+    1036   00:454D  C6 07                       add     a,7                  ; object radius + effective ball radius
+    1037   00:454F  FE 14                       cp      20                   ; SquareTable currently covers 0..19
+    1038   00:4551  38 02                       jr      c,.radiusReady
+    1039   00:4553  3E 13                       ld      a,19
+    1040   00:4555                      .radiusReady:
+    1041   00:4555  32 18 C0                    ld      (OBJECT_RADIUS),a
+    1042   00:4558  CD A0 48                    call    SquareA
+    1043   00:455B  22 19 C0                    ld      (OBJECT_RADIUS_SQ),hl
+    1044   00:455E                      
+    1045   00:455E  3A 01 C0                    ld      a,(BALL_X+1)
+    1046   00:4561  C6 08                       add     a,8                  ; the smaller ball remains centred in 16x16
+    1047   00:4563  DD 96 01                    sub     (ix+1)
+    1048   00:4566  4F                          ld      c,a                  ; retain signed horizontal side
+    1049   00:4567  32 0F C0                    ld      (BALL_HIT_X),a
+    1050   00:456A  CD 9A 48                    call    AbsA
+    1051   00:456D  32 1D C0                    ld      (ABS_HIT_X),a
+    1052   00:4570  4F                          ld      c,a
+    1053   00:4571  3A 18 C0                    ld      a,(OBJECT_RADIUS)
+    1054   00:4574  57                          ld      d,a
+    1055   00:4575  79                          ld      a,c
+    1056   00:4576  BA                          cp      d
+    1057   00:4577  D2 1B 46                    jp      nc,.next
+    1058   00:457A  79                          ld      a,c
+    1059   00:457B  5F                          ld      e,a                  ; absolute horizontal distance
+    1060   00:457C  CD A0 48                    call    SquareA
+    1061   00:457F  E5                          push    hl
+    1062   00:4580                      
+    1063   00:4580  3A 03 C0                    ld      a,(BALL_Y+1)
+    1064   00:4583  C6 08                       add     a,8
+    1065   00:4585  DD 96 02                    sub     (ix+2)
+    1066   00:4588  57                          ld      d,a                  ; retain signed vertical side
+    1067   00:4589  32 10 C0                    ld      (BALL_HIT_Y),a
+    1068   00:458C  CD 9A 48                    call    AbsA
+    1069   00:458F  32 1E C0                    ld      (ABS_HIT_Y),a
+    1070   00:4592  4F                          ld      c,a
+    1071   00:4593  3A 18 C0                    ld      a,(OBJECT_RADIUS)
+    1072   00:4596  57                          ld      d,a
+    1073   00:4597  79                          ld      a,c
+    1074   00:4598  BA                          cp      d
+    1075   00:4599  D2 1A 46                    jp      nc,.discardNext
+    1076   00:459C  61                          ld      h,c                  ; retain absolute vertical distance
+    1077   00:459D                      
+    1078   00:459D                              ; Narrow phase: dx^2 + dy^2 < combinedRadius^2.
+    1079   00:459D  7C                          ld      a,h
+    1080   00:459E  CD A0 48                    call    SquareA
+    1081   00:45A1  D1                          pop     de                   ; DE = horizontal distance squared
+    1082   00:45A2  19                          add     hl,de
+    1083   00:45A3  ED 5B 19 C0                 ld      de,(OBJECT_RADIUS_SQ)
+    1084   00:45A7  B7                          or      a
+    1085   00:45A8  ED 52                       sbc     hl,de
+    1086   00:45AA  D2 1B 46                    jp      nc,.next
+    1087   00:45AD                      
+    1088   00:45AD  CD 9C 46                    call    SelectCircleNormal
+    1089   00:45B0                              ; Circle/polygon objects use one-pixel separation to escape overlap.
+    1090   00:45B0                              ; Flippers intentionally do not: separation at their pivot caused loops.
+    1091   00:45B0  CD EC 46                    call    SeparateCircleOnePixel
+    1092   00:45B3  DD 7E 01                    ld      a,(ix+1)
+    1093   00:45B6  D6 08                       sub     8
+    1094   00:45B8  47                          ld      b,a
+    1095   00:45B9  DD 7E 02                    ld      a,(ix+2)
+    1096   00:45BC  D6 08                       sub     8
+    1097   00:45BE  4F                          ld      c,a
+    1098   00:45BF  DD 7E 07                    ld      a,(ix+7)
+    1099   00:45C2  CD 33 4C                    call    QueueObjectAnimation
+    1100   00:45C5                      
+    1101   00:45C5  DD 7E 00                    ld      a,(ix+0)
+    1102   00:45C8  B7                          or      a
+    1103   00:45C9  28 3B                       jr      z,.passive
+    1104   00:45CB  DD 7E 04                    ld      a,(ix+4)
+    1105   00:45CE  B7                          or      a
+    1106   00:45CF  28 35                       jr      z,.passive
+    1107   00:45D1  3A 09 C0                    ld      a,(BUMPER_LOCK)
+    1108   00:45D4  B7                          or      a
+    1109   00:45D5  20 2F                       jr      nz,.passive          ; short debounce after a genuine release
+    1110   00:45D7  3A 1F C0                    ld      a,(LAST_BUMPER_KIND)
+    1111   00:45DA  FE 01                       cp      1
+    1112   00:45DC  20 0B                       jr      nz,.newActive
+    1113   00:45DE  DD E5                       push    ix
+    1114   00:45E0  D1                          pop     de
+    1115   00:45E1  2A 1B C0                    ld      hl,(LAST_BUMPER_PTR)
+    1116   00:45E4  B7                          or      a
+    1117   00:45E5  ED 52                       sbc     hl,de
+    1118   00:45E7  28 1D                       jr      z,.passive           ; same bumper stays passive until re-armed
+    1119   00:45E9                      .newActive:
+    1120   00:45E9                      
+    1121   00:45E9                              ; Reflect the incoming component, then add one outward bumper impulse.
+    1122   00:45E9  CD 43 47                    call    PassiveCircleResponse
+    1123   00:45EC  DD 7E 04                    ld      a,(ix+4)             ; reload kick; A was used by the latch test
+    1124   00:45EF  FE 02                       cp      2
+    1125   00:45F1  21 00 02                    ld      hl,0200h
+    1126   00:45F4  38 08                       jr      c,.kickReady
+    1127   00:45F6  21 00 03                    ld      hl,0300h
+    1128   00:45F9  28 03                       jr      z,.kickReady
+    1129   00:45FB  21 00 04                    ld      hl,0400h
+    1130   00:45FE                      .kickReady:
+    1131   00:45FE  CD FE 47                    call    AddCircleImpulse
+    1132   00:4601  CD 5B 48                    call    ClampBallVelocity
+    1133   00:4604  18 03                       jr      .activeHit
+    1134   00:4606                      
+    1135   00:4606                      .passive:
+    1136   00:4606  C3 43 47                    jp      PassiveCircleResponse
+    1137   00:4609                      .activeHit:
+    1138   00:4609  DD E5                       push    ix
+    1139   00:460B  E1                          pop     hl
+    1140   00:460C  22 1B C0                    ld      (LAST_BUMPER_PTR),hl
+    1141   00:460F  3E 01                       ld      a,1
+    1142   00:4611  32 1F C0                    ld      (LAST_BUMPER_KIND),a
+    1143   00:4614  3E 0C                       ld      a,12                 ; 0.2 s debounce for tight wall corners
+    1144   00:4616  32 09 C0                    ld      (BUMPER_LOCK),a
+    1145   00:4619  C9                          ret
+    1146   00:461A                      
+    1147   00:461A                      .discardNext:
+    1148   00:461A  E1                          pop     hl
+    1149   00:461B                      .next:
+    1150   00:461B  DD 23                       inc     ix
+    1151   00:461D  DD 23                       inc     ix
+    1152   00:461F  DD 23                       inc     ix
+    1153   00:4621  DD 23                       inc     ix
+    1154   00:4623  DD 23                       inc     ix
+    1155   00:4625  DD 23                       inc     ix
+    1156   00:4627  DD 23                       inc     ix
+    1157   00:4629  DD 23                       inc     ix
+    1158   00:462B  05                          dec     b
+    1159   00:462C  C2 4A 45                    jp      nz,.loop
+    1160   00:462F  C9                          ret
+    1161   00:4630                      
+    1162   00:4630                      ; Rearm only after the ball centre is four pixels beyond the collision radius.
+    1163   00:4630                      ; This hysteresis prevents a wall/bumper corner from firing again after a
+    1164   00:4630                      ; single substep that merely grazed the exact mathematical boundary.
+    1165   00:4630                      MaybeRearmLastBumper:
+    1166   00:4630  3A 1F C0                    ld      a,(LAST_BUMPER_KIND)
+    1167   00:4633  FE 01                       cp      1
+    1168   00:4635  C0                          ret     nz
+    1169   00:4636  2A 1B C0                    ld      hl,(LAST_BUMPER_PTR)
+    1170   00:4639  7C                          ld      a,h
+    1171   00:463A  B5                          or      l
+    1172   00:463B  C8                          ret     z
+    1173   00:463C  E5                          push    hl
+    1174   00:463D  DD E1                       pop     ix
+    1175   00:463F  DD 7E 03                    ld      a,(ix+3)
+    1176   00:4642  C6 0B                       add     a,11                 ; ball radius 7 + release margin 4
+    1177   00:4644  FE 14                       cp      20
+    1178   00:4646  38 02                       jr      c,.radiusReady
+    1179   00:4648  3E 13                       ld      a,19
+    1180   00:464A                      .radiusReady:
+    1181   00:464A  32 18 C0                    ld      (OBJECT_RADIUS),a
+    1182   00:464D  CD A0 48                    call    SquareA
+    1183   00:4650  22 19 C0                    ld      (OBJECT_RADIUS_SQ),hl
+    1184   00:4653                      
+    1185   00:4653  3A 01 C0                    ld      a,(BALL_X+1)
+    1186   00:4656  C6 08                       add     a,8
+    1187   00:4658  DD 96 01                    sub     (ix+1)
+    1188   00:465B  CD 9A 48                    call    AbsA
+    1189   00:465E  4F                          ld      c,a
+    1190   00:465F  3A 18 C0                    ld      a,(OBJECT_RADIUS)
+    1191   00:4662  B9                          cp      c
+    1192   00:4663  38 29                       jr      c,.rearm
+    1193   00:4665  28 27                       jr      z,.rearm
+    1194   00:4667  79                          ld      a,c
+    1195   00:4668  CD A0 48                    call    SquareA
+    1196   00:466B  E5                          push    hl
+    1197   00:466C                      
+    1198   00:466C  3A 03 C0                    ld      a,(BALL_Y+1)
+    1199   00:466F  C6 08                       add     a,8
+    1200   00:4671  DD 96 02                    sub     (ix+2)
+    1201   00:4674  CD 9A 48                    call    AbsA
+    1202   00:4677  4F                          ld      c,a
+    1203   00:4678  3A 18 C0                    ld      a,(OBJECT_RADIUS)
+    1204   00:467B  B9                          cp      c
+    1205   00:467C  38 1B                       jr      c,.discardRearm
+    1206   00:467E  28 19                       jr      z,.discardRearm
+    1207   00:4680  79                          ld      a,c
+    1208   00:4681  CD A0 48                    call    SquareA
+    1209   00:4684  D1                          pop     de
+    1210   00:4685  19                          add     hl,de
+    1211   00:4686  ED 5B 19 C0                 ld      de,(OBJECT_RADIUS_SQ)
+    1212   00:468A  B7                          or      a
+    1213   00:468B  ED 52                       sbc     hl,de
+    1214   00:468D  D8                          ret     c                    ; still inside the expanded release zone
+    1215   00:468E                      .rearm:
+    1216   00:468E  21 00 00                    ld      hl,0
+    1217   00:4691  22 1B C0                    ld      (LAST_BUMPER_PTR),hl
+    1218   00:4694  AF                          xor     a
+    1219   00:4695  32 1F C0                    ld      (LAST_BUMPER_KIND),a
+    1220   00:4698  C9                          ret
+    1221   00:4699                      .discardRearm:
+    1222   00:4699  E1                          pop     hl
+    1223   00:469A  18 F2                       jr      .rearm
+    1224   00:469C                      
+    1225   00:469C                      ; Choose the nearest of eight outward normals. BALL_SIDE is clockwise:
+    1226   00:469C                      ; 0=right, 1=down-right, 2=down, 3=down-left, 4=left, 5=up-left,
+    1227   00:469C                      ; 6=up, 7=up-right. A 2:1 boundary keeps shallow contacts on an axis.
+    1228   00:469C                      SelectCircleNormal:
+    1229   00:469C  3A 1D C0                    ld      a,(ABS_HIT_X)
+    1230   00:469F  87                          add     a,a
+    1231   00:46A0  4F                          ld      c,a                  ; C = 2*abs(dx)
+    1232   00:46A1  3A 1E C0                    ld      a,(ABS_HIT_Y)
+    1233   00:46A4  B9                          cp      c
+    1234   00:46A5  30 36                       jr      nc,.vertical
+    1235   00:46A7  87                          add     a,a                  ; A = 2*abs(dy)
+    1236   00:46A8  4F                          ld      c,a
+    1237   00:46A9  3A 1D C0                    ld      a,(ABS_HIT_X)
+    1238   00:46AC  B9                          cp      c
+    1239   00:46AD  30 21                       jr      nc,.horizontal
+    1240   00:46AF                      
+    1241   00:46AF  3A 0F C0                    ld      a,(BALL_HIT_X)
+    1242   00:46B2  CB 7F                       bit     7,a
+    1243   00:46B4  20 0D                       jr      nz,.diagLeft
+    1244   00:46B6  3A 10 C0                    ld      a,(BALL_HIT_Y)
+    1245   00:46B9  CB 7F                       bit     7,a
+    1246   00:46BB  3E 01                       ld      a,1                  ; down-right
+    1247   00:46BD  28 29                       jr      z,.store
+    1248   00:46BF  3E 07                       ld      a,7                  ; up-right
+    1249   00:46C1  18 25                       jr      .store
+    1250   00:46C3                      .diagLeft:
+    1251   00:46C3  3A 10 C0                    ld      a,(BALL_HIT_Y)
+    1252   00:46C6  CB 7F                       bit     7,a
+    1253   00:46C8  3E 03                       ld      a,3                  ; down-left
+    1254   00:46CA  28 1C                       jr      z,.store
+    1255   00:46CC  3E 05                       ld      a,5                  ; up-left
+    1256   00:46CE  18 18                       jr      .store
+    1257   00:46D0                      .horizontal:
+    1258   00:46D0  3A 0F C0                    ld      a,(BALL_HIT_X)
+    1259   00:46D3  CB 7F                       bit     7,a
+    1260   00:46D5  3E 00                       ld      a,0
+    1261   00:46D7  28 0F                       jr      z,.store
+    1262   00:46D9  3E 04                       ld      a,4
+    1263   00:46DB  18 0B                       jr      .store
+    1264   00:46DD                      .vertical:
+    1265   00:46DD  3A 10 C0                    ld      a,(BALL_HIT_Y)
+    1266   00:46E0  CB 7F                       bit     7,a
+    1267   00:46E2  3E 02                       ld      a,2
+    1268   00:46E4  28 02                       jr      z,.store
+    1269   00:46E6  3E 06                       ld      a,6
+    1270   00:46E8                      .store:
+    1271   00:46E8  32 0C C0                    ld      (BALL_SIDE),a
+    1272   00:46EB  C9                          ret
+    1273   00:46EC                      
+    1274   00:46EC                      ; Correct only one pixel along the selected normal. This prevents persistent
+    1275   00:46EC                      ; overlap without the visible multi-pixel axis snap used by the old resolver.
+    1276   00:46EC                      SeparateCircleOnePixel:
+    1277   00:46EC  3A 0C C0                    ld      a,(BALL_SIDE)
+    1278   00:46EF  FE 02                       cp      2
+    1279   00:46F1  28 29                       jr      z,.down
+    1280   00:46F3  FE 06                       cp      6
+    1281   00:46F5  28 1A                       jr      z,.up
+    1282   00:46F7  FE 04                       cp      4
+    1283   00:46F9  28 2C                       jr      z,.left
+    1284   00:46FB  B7                          or      a
+    1285   00:46FC  28 2C                       jr      z,.right
+    1286   00:46FE  CB 57                       bit     2,a
+    1287   00:4700  28 05                       jr      z,.diagRight
+    1288   00:4702                      .diagLeft:
+    1289   00:4702  CD 2D 47                    call    MoveBallLeftOne
+    1290   00:4705  18 03                       jr      .diagY
+    1291   00:4707                      .diagRight:
+    1292   00:4707  CD 38 47                    call    MoveBallRightOne
+    1293   00:470A                      .diagY:
+    1294   00:470A  3A 0C C0                    ld      a,(BALL_SIDE)
+    1295   00:470D  FE 04                       cp      4
+    1296   00:470F  38 0B                       jr      c,.down
+    1297   00:4711                      .up:
+    1298   00:4711  2A 02 C0                    ld      hl,(BALL_Y)
+    1299   00:4714  11 00 FF                    ld      de,0ff00h
+    1300   00:4717  19                          add     hl,de
+    1301   00:4718  22 02 C0                    ld      (BALL_Y),hl
+    1302   00:471B  C9                          ret
+    1303   00:471C                      .down:
+    1304   00:471C  2A 02 C0                    ld      hl,(BALL_Y)
+    1305   00:471F  11 00 01                    ld      de,0100h
+    1306   00:4722  19                          add     hl,de
+    1307   00:4723  22 02 C0                    ld      (BALL_Y),hl
+    1308   00:4726  C9                          ret
+    1309   00:4727                      .left:
+    1310   00:4727  C3 2D 47                    jp      MoveBallLeftOne
+    1311   00:472A                      .right:
+    1312   00:472A  C3 38 47                    jp      MoveBallRightOne
+    1313   00:472D                      
+    1314   00:472D                      MoveBallLeftOne:
+    1315   00:472D  2A 00 C0                    ld      hl,(BALL_X)
+    1316   00:4730  11 00 FF                    ld      de,0ff00h
+    1317   00:4733  19                          add     hl,de
+    1318   00:4734  22 00 C0                    ld      (BALL_X),hl
+    1319   00:4737  C9                          ret
+    1320   00:4738                      MoveBallRightOne:
+    1321   00:4738  2A 00 C0                    ld      hl,(BALL_X)
+    1322   00:473B  11 00 01                    ld      de,0100h
+    1323   00:473E  19                          add     hl,de
+    1324   00:473F  22 00 C0                    ld      (BALL_X),hl
+    1325   00:4742  C9                          ret
+    1326   00:4743                      
+    1327   00:4743                      ; Reflect only while velocity points into the selected surface. Axis normals
+    1328   00:4743                      ; use the existing material damping. For a 45-degree normal the exact fixed-
+    1329   00:4743                      ; point reflection is a (possibly negated) swap of VX and VY.
+    1330   00:4743                      PassiveCircleResponse:
+    1331   00:4743  3A 0C C0                    ld      a,(BALL_SIDE)
+    1332   00:4746  CB 47                       bit     0,a
+    1333   00:4748  20 40                       jr      nz,.diagonal
+    1334   00:474A  FE 02                       cp      2
+    1335   00:474C  28 22                       jr      z,.down
+    1336   00:474E  FE 06                       cp      6
+    1337   00:4750  28 2B                       jr      z,.up
+    1338   00:4752  FE 04                       cp      4
+    1339   00:4754  28 0D                       jr      z,.left
+    1340   00:4756                      .right:
+    1341   00:4756  2A 04 C0                    ld      hl,(BALL_VX)
+    1342   00:4759  CB 7C                       bit     7,h
+    1343   00:475B  C8                          ret     z
+    1344   00:475C  CD D0 43                    call    NegateAndDamp
+    1345   00:475F  22 04 C0                    ld      (BALL_VX),hl
+    1346   00:4762  C9                          ret
+    1347   00:4763                      .left:
+    1348   00:4763  2A 04 C0                    ld      hl,(BALL_VX)
+    1349   00:4766  CB 7C                       bit     7,h
+    1350   00:4768  C0                          ret     nz
+    1351   00:4769  CD D0 43                    call    NegateAndDamp
+    1352   00:476C  22 04 C0                    ld      (BALL_VX),hl
+    1353   00:476F  C9                          ret
+    1354   00:4770                      .down:
+    1355   00:4770  2A 06 C0                    ld      hl,(BALL_VY)
+    1356   00:4773  CB 7C                       bit     7,h
+    1357   00:4775  C8                          ret     z
+    1358   00:4776  CD D0 43                    call    NegateAndDamp
+    1359   00:4779  22 06 C0                    ld      (BALL_VY),hl
+    1360   00:477C  C9                          ret
+    1361   00:477D                      .up:
+    1362   00:477D  2A 06 C0                    ld      hl,(BALL_VY)
+    1363   00:4780  CB 7C                       bit     7,h
+    1364   00:4782  C0                          ret     nz
+    1365   00:4783  CD D0 43                    call    NegateAndDamp
+    1366   00:4786  22 06 C0                    ld      (BALL_VY),hl
+    1367   00:4789  C9                          ret
+    1368   00:478A                      .diagonal:
+    1369   00:478A  FE 01                       cp      1
+    1370   00:478C  28 17                       jr      z,.testSE
+    1371   00:478E  FE 03                       cp      3
+    1372   00:4790  28 20                       jr      z,.testSW
+    1373   00:4792  FE 05                       cp      5
+    1374   00:4794  28 2E                       jr      z,.testNW
+    1375   00:4796                              ; NE: approaching when VX-VY < 0; reflect to (VY,VX).
+    1376   00:4796  2A 04 C0                    ld      hl,(BALL_VX)
+    1377   00:4799  ED 5B 06 C0                 ld      de,(BALL_VY)
+    1378   00:479D  B7                          or      a
+    1379   00:479E  ED 52                       sbc     hl,de
+    1380   00:47A0  CB 7C                       bit     7,h
+    1381   00:47A2  C8                          ret     z
+    1382   00:47A3  18 2F                       jr      .swap
+    1383   00:47A5                      .testSE:
+    1384   00:47A5                              ; SE: approaching when VX+VY < 0; reflect to (-VY,-VX).
+    1385   00:47A5  2A 04 C0                    ld      hl,(BALL_VX)
+    1386   00:47A8  ED 5B 06 C0                 ld      de,(BALL_VY)
+    1387   00:47AC  19                          add     hl,de
+    1388   00:47AD  CB 7C                       bit     7,h
+    1389   00:47AF  C8                          ret     z
+    1390   00:47B0  18 37                       jr      .negSwap
+    1391   00:47B2                      .testSW:
+    1392   00:47B2                              ; SW: approaching when VX-VY > 0; reflect to (VY,VX).
+    1393   00:47B2  2A 04 C0                    ld      hl,(BALL_VX)
+    1394   00:47B5  ED 5B 06 C0                 ld      de,(BALL_VY)
+    1395   00:47B9  B7                          or      a
+    1396   00:47BA  ED 52                       sbc     hl,de
+    1397   00:47BC  CB 7C                       bit     7,h
+    1398   00:47BE  C0                          ret     nz
+    1399   00:47BF  7C                          ld      a,h
+    1400   00:47C0  B5                          or      l
+    1401   00:47C1  C8                          ret     z
+    1402   00:47C2  18 10                       jr      .swap
+    1403   00:47C4                      .testNW:
+    1404   00:47C4                              ; NW: approaching when VX+VY > 0; reflect to (-VY,-VX).
+    1405   00:47C4  2A 04 C0                    ld      hl,(BALL_VX)
+    1406   00:47C7  ED 5B 06 C0                 ld      de,(BALL_VY)
+    1407   00:47CB  19                          add     hl,de
+    1408   00:47CC  CB 7C                       bit     7,h
+    1409   00:47CE  C0                          ret     nz
+    1410   00:47CF  7C                          ld      a,h
+    1411   00:47D0  B5                          or      l
+    1412   00:47D1  C8                          ret     z
+    1413   00:47D2  18 15                       jr      .negSwap
+    1414   00:47D4                      .swap:
+    1415   00:47D4  2A 04 C0                    ld      hl,(BALL_VX)
+    1416   00:47D7  E5                          push    hl
+    1417   00:47D8  2A 06 C0                    ld      hl,(BALL_VY)
+    1418   00:47DB  CD E7 43                    call    DampHL
+    1419   00:47DE  22 04 C0                    ld      (BALL_VX),hl
+    1420   00:47E1  E1                          pop     hl
+    1421   00:47E2  CD E7 43                    call    DampHL
+    1422   00:47E5  22 06 C0                    ld      (BALL_VY),hl
+    1423   00:47E8  C9                          ret
+    1424   00:47E9                      .negSwap:
+    1425   00:47E9  2A 04 C0                    ld      hl,(BALL_VX)
+    1426   00:47EC  E5                          push    hl
+    1427   00:47ED  2A 06 C0                    ld      hl,(BALL_VY)
+    1428   00:47F0  CD D0 43                    call    NegateAndDamp
+    1429   00:47F3  22 04 C0                    ld      (BALL_VX),hl
+    1430   00:47F6  E1                          pop     hl
+    1431   00:47F7  CD D0 43                    call    NegateAndDamp
+    1432   00:47FA  22 06 C0                    ld      (BALL_VY),hl
+    1433   00:47FD  C9                          ret
+    1434   00:47FE                      
+    1435   00:47FE                      ; HL is the bumper strength in 8.8 pixels/frame. Diagonal impulses use 3/4
+    1436   00:47FE                      ; per axis, closely approximating a normalised 45-degree vector.
+    1437   00:47FE                      AddCircleImpulse:
+    1438   00:47FE  3A 0C C0                    ld      a,(BALL_SIDE)
+    1439   00:4801  CB 47                       bit     0,a
+    1440   00:4803  20 28                       jr      nz,.diagonal
+    1441   00:4805  FE 02                       cp      2
+    1442   00:4807  28 16                       jr      z,.down
+    1443   00:4809  FE 06                       cp      6
+    1444   00:480B  28 1B                       jr      z,.up
+    1445   00:480D  FE 04                       cp      4
+    1446   00:480F  28 09                       jr      z,.left
+    1447   00:4811                      .right:
+    1448   00:4811  ED 5B 04 C0                 ld      de,(BALL_VX)
+    1449   00:4815  19                          add     hl,de
+    1450   00:4816  22 04 C0                    ld      (BALL_VX),hl
+    1451   00:4819  C9                          ret
+    1452   00:481A                      .left:
+    1453   00:481A  CD 93 48                    call    NegateHL
+    1454   00:481D  18 F2                       jr      .right
+    1455   00:481F                      .down:
+    1456   00:481F  ED 5B 06 C0                 ld      de,(BALL_VY)
+    1457   00:4823  19                          add     hl,de
+    1458   00:4824  22 06 C0                    ld      (BALL_VY),hl
+    1459   00:4827  C9                          ret
+    1460   00:4828                      .up:
+    1461   00:4828  CD 93 48                    call    NegateHL
+    1462   00:482B  18 F2                       jr      .down
+    1463   00:482D                      .diagonal:
+    1464   00:482D  CD E7 43                    call    DampHL
+    1465   00:4830  E5                          push    hl                   ; positive diagonal component
+    1466   00:4831  3A 0C C0                    ld      a,(BALL_SIDE)
+    1467   00:4834  FE 03                       cp      3
+    1468   00:4836  38 07                       jr      c,.xPositive
+    1469   00:4838  FE 07                       cp      7
+    1470   00:483A  28 03                       jr      z,.xPositive
+    1471   00:483C  CD 93 48                    call    NegateHL
+    1472   00:483F                      .xPositive:
+    1473   00:483F  ED 5B 04 C0                 ld      de,(BALL_VX)
+    1474   00:4843  19                          add     hl,de
+    1475   00:4844  22 04 C0                    ld      (BALL_VX),hl
+    1476   00:4847  E1                          pop     hl
+    1477   00:4848  3A 0C C0                    ld      a,(BALL_SIDE)
+    1478   00:484B  FE 05                       cp      5
+    1479   00:484D  38 03                       jr      c,.yPositive
+    1480   00:484F  CD 93 48                    call    NegateHL
+    1481   00:4852                      .yPositive:
+    1482   00:4852  ED 5B 06 C0                 ld      de,(BALL_VY)
+    1483   00:4856  19                          add     hl,de
+    1484   00:4857  22 06 C0                    ld      (BALL_VY),hl
+    1485   00:485A  C9                          ret
+    1486   00:485B                      
+    1487   00:485B                      ; Active bumpers add energy, but repeated wall contacts must never accumulate
+    1488   00:485B                      ; beyond the same five-pixel component limit used for terminal fall speed.
+    1489   00:485B                      ClampBallVelocity:
+    1490   00:485B  2A 04 C0                    ld      hl,(BALL_VX)
+    1491   00:485E  CD 6E 48                    call    ClampHLToFive
+    1492   00:4861  22 04 C0                    ld      (BALL_VX),hl
+    1493   00:4864  2A 06 C0                    ld      hl,(BALL_VY)
+    1494   00:4867  CD 6E 48                    call    ClampHLToFive
+    1495   00:486A  22 06 C0                    ld      (BALL_VY),hl
+    1496   00:486D  C9                          ret
+    1497   00:486E                      
+    1498   00:486E                      ClampHLToFive:
+    1499   00:486E  CB 7C                       bit     7,h
+    1500   00:4870  20 0D                       jr      nz,.negative
+    1501   00:4872                      .positive:
+    1502   00:4872  7C                          ld      a,h
+    1503   00:4873  FE 05                       cp      5
+    1504   00:4875  D8                          ret     c
+    1505   00:4876  20 03                       jr      nz,.positiveLimit
+    1506   00:4878  7D                          ld      a,l
+    1507   00:4879  B7                          or      a
+    1508   00:487A  C8                          ret     z
+    1509   00:487B                      .positiveLimit:
+    1510   00:487B  21 00 05                    ld      hl,0500h
+    1511   00:487E  C9                          ret
+    1512   00:487F                      .negative:
+    1513   00:487F  CD 93 48                    call    NegateHL
+    1514   00:4882  7C                          ld      a,h
+    1515   00:4883  FE 05                       cp      5
+    1516   00:4885  38 09                       jr      c,.restoreNegative
+    1517   00:4887  20 04                       jr      nz,.negativeLimit
+    1518   00:4889  7D                          ld      a,l
+    1519   00:488A  B7                          or      a
+    1520   00:488B  28 03                       jr      z,.restoreNegative
+    1521   00:488D                      .negativeLimit:
+    1522   00:488D  21 00 05                    ld      hl,0500h
+    1523   00:4890                      .restoreNegative:
+    1524   00:4890  C3 93 48                    jp      NegateHL
+    1525   00:4893                      
+    1526   00:4893                      NegateHL:
+    1527   00:4893  AF                          xor     a
+    1528   00:4894  95                          sub     l
+    1529   00:4895  6F                          ld      l,a
+    1530   00:4896  9F                          sbc     a,a
+    1531   00:4897  94                          sub     h
+    1532   00:4898  67                          ld      h,a
+    1533   00:4899  C9                          ret
+    1534   00:489A                      
+    1535   00:489A                      AbsA:
+    1536   00:489A  CB 7F                       bit     7,a
+    1537   00:489C  C8                          ret     z
+    1538   00:489D  ED 44                       neg
+    1539   00:489F  C9                          ret
+    1540   00:48A0                      
+    1541   00:48A0                      ; Return HL = A*A for A in the range 0..19.
+    1542   00:48A0                      SquareA:
+    1543   00:48A0  D5                          push    de
+    1544   00:48A1  87                          add     a,a
+    1545   00:48A2  5F                          ld      e,a
+    1546   00:48A3  16 00                       ld      d,0
+    1547   00:48A5  21 AF 48                    ld      hl,SquareTable
+    1548   00:48A8  19                          add     hl,de
+    1549   00:48A9  5E                          ld      e,(hl)
+    1550   00:48AA  23                          inc     hl
+    1551   00:48AB  56                          ld      d,(hl)
+    1552   00:48AC  EB                          ex      de,hl
+    1553   00:48AD  D1                          pop     de
+    1554   00:48AE  C9                          ret
+    1555   00:48AF                      
+    1556   00:48AF                      SquareTable:
+    1557   00:48AF                              dw      0,1,4,9,16,25,36,49,64,81
+    1557   00:48AF  00 00 01 00 04 00 09 00 10 00 19 00 24 00 31 00 
+    1557   00:48BF  40 00 51 00 
+    1558   00:48C3                              dw      100,121,144,169,196,225,256,289,324,361
+    1558   00:48C3  64 00 79 00 90 00 A9 00 C4 00 E1 00 00 01 21 01 
+    1558   00:48D3  44 01 69 01 
+    1559   00:48D7                      
+    1560   00:48D7                      ; -----------------------------------------------------------------------------
+    1561   00:48D7                      ; Flipper collisions
+    1562   00:48D7                      ; -----------------------------------------------------------------------------
+    1563   00:48D7                      ;
+    1564   00:48D7                      ; maps/flippers.tmx supplies one convex polygon for every left/right animation
+    1565   00:48D7                      ; frame. The build expands each polygon by the ball radius and compiles it into
+    1566   00:48D7                      ; a packed per-pixel normal field, so runtime collision is just one lookup.
+    1567   00:48D7                      ; Fields are pivot-relative and therefore reusable at another table position.
+    1568   00:48D7                      ; Flipper collision changes velocity only; it never rewrites BALL_X/BALL_Y.
+    1569   00:48D7                      CheckFlippers:
+    1570   00:48D7  3A 13 51                    ld      a,(FlipperInstances)
+    1571   00:48DA  B7                          or      a
+    1572   00:48DB  C8                          ret     z
+    1573   00:48DC  47                          ld      b,a
+    1574   00:48DD  FD 21 14 51                 ld      iy,FlipperInstances+1
+    1575   00:48E1                      .loop:
+    1576   00:48E1  C5                          push    bc
+    1577   00:48E2  CD 99 49                    call    GetInstanceFrame
+    1578   00:48E5  32 2C C0                    ld      (FLIPPER_NORMAL+1),a  ; temporary current frame, overwritten later
+    1579   00:48E8  4F                          ld      c,a
+    1580   00:48E9  FD 7E 00                    ld      a,(iy+0)             ; visual/collision side: 0 left, 1 right
+    1581   00:48EC  B7                          or      a
+    1582   00:48ED  79                          ld      a,c
+    1583   00:48EE  28 02                       jr      z,.fieldReady
+    1584   00:48F0  C6 03                       add     a,3                  ; right fields occupy header slots 3..5
+    1585   00:48F2                      .fieldReady:
+    1586   00:48F2  CD AF 4A                    call    LoadFlipperCollisionField
+    1587   00:48F5  FD 7E 02                    ld      a,(iy+2)
+    1588   00:48F8  32 2F C0                    ld      (FLIPPER_PIVOT_X),a
+    1589   00:48FB  FD 7E 03                    ld      a,(iy+3)
+    1590   00:48FE  32 2E C0                    ld      (FLIPPER_PIVOT_Y),a
+    1591   00:4901  CD C2 4A                    call    LookupFlipperCollisionField
+    1592   00:4904  D2 8E 49                    jp      nc,.next
+    1593   00:4907  E6 0F                       and     00fh
+    1594   00:4909  CA 8E 49                    jp      z,.next
+    1595   00:490C  3D                          dec     a
+    1596   00:490D  32 0C C0                    ld      (BALL_SIDE),a
+    1597   00:4910  CD 2E 4B                    call    MeasureFlipperDistance
+    1598   00:4913  CD A5 49                    call    GetInstanceKick
+    1599   00:4916  B7                          or      a
+    1600   00:4917  20 30                       jr      nz,.activeHit
+    1601   00:4919                      
+    1602   00:4919                              ; Normal 6 is the long upper blade edge. It uses slope-aware rolling;
+    1603   00:4919                              ; cap, underside and polygon corners use their generated normal directly.
+    1604   00:4919  3A 0C C0                    ld      a,(BALL_SIDE)
+    1605   00:491C  FE 06                       cp      6
+    1606   00:491E  20 24                       jr      nz,.genericPassive
+    1607   00:4920  FD 7E 00                    ld      a,(iy+0)
+    1608   00:4923  B7                          or      a
+    1609   00:4924  20 0C                       jr      nz,.rightBlade
+    1610   00:4926  3A 2C C0                    ld      a,(FLIPPER_NORMAL+1)
+    1611   00:4929  B7                          or      a
+    1612   00:492A  3E 03                       ld      a,3                  ; resting left: downhill right
+    1613   00:492C  28 0E                       jr      z,.bladeReady
+    1614   00:492E  3E 01                       ld      a,1                  ; raised left: downhill toward left pivot
+    1615   00:4930  18 0A                       jr      .bladeReady
+    1616   00:4932                      .rightBlade:
+    1617   00:4932  3A 2C C0                    ld      a,(FLIPPER_NORMAL+1)
+    1618   00:4935  B7                          or      a
+    1619   00:4936  3E 04                       ld      a,4                  ; resting right: downhill left
+    1620   00:4938  28 02                       jr      z,.bladeReady
+    1621   00:493A  3E 02                       ld      a,2                  ; raised right: downhill toward right pivot
+    1622   00:493C                      .bladeReady:
+    1623   00:493C  32 0C C0                    ld      (BALL_SIDE),a
+    1624   00:493F  CD B1 49                    call    PassiveFlipperHit
+    1625   00:4942  C1                          pop     bc
+    1626   00:4943  C9                          ret
+    1627   00:4944                      .genericPassive:
+    1628   00:4944  CD 43 47                    call    PassiveCircleResponse
+    1629   00:4947  C1                          pop     bc
+    1630   00:4948  C9                          ret
+    1631   00:4949                      
+    1632   00:4949                      .activeHit:
+    1633   00:4949                              ; Close to the axle the horizontal component points outward; farther
+    1634   00:4949                              ; along the blade it points inward. The generated base threshold makes
+    1635   00:4949                              ; this decision independent of the flipper's world position.
+    1636   00:4949  3A 2D C0                    ld      a,(FLIPPER_DISTANCE)
+    1637   00:494C  DD BE 04                    cp      (ix+4)
+    1638   00:494F  30 0E                       jr      nc,.inwardKick
+    1639   00:4951  FD 7E 00                    ld      a,(iy+0)
+    1640   00:4954  B7                          or      a
+    1641   00:4955  21 C0 FE                    ld      hl,0fec0h            ; left base pushes left
+    1642   00:4958  28 11                       jr      z,.storeKickX
+    1643   00:495A  21 40 01                    ld      hl,0140h             ; right base pushes right
+    1644   00:495D  18 0C                       jr      .storeKickX
+    1645   00:495F                      .inwardKick:
+    1646   00:495F  FD 7E 00                    ld      a,(iy+0)
+    1647   00:4962  B7                          or      a
+    1648   00:4963  21 40 01                    ld      hl,0140h             ; left blade points inward/right
+    1649   00:4966  28 03                       jr      z,.storeKickX
+    1650   00:4968  21 C0 FE                    ld      hl,0fec0h            ; right blade points inward/left
+    1651   00:496B                      .storeKickX:
+    1652   00:496B  22 04 C0                    ld      (BALL_VX),hl
+    1653   00:496E  3A 2D C0                    ld      a,(FLIPPER_DISTANCE)
+    1654   00:4971  DD BE 04                    cp      (ix+4)
+    1655   00:4974  21 00 FD                    ld      hl,FLIPPER_BASE_VY
+    1656   00:4977  38 0B                       jr      c,.storeKick
+    1657   00:4979  DD BE 05                    cp      (ix+5)
+    1658   00:497C  21 00 FC                    ld      hl,FLIPPER_MID_VY
+    1659   00:497F  38 03                       jr      c,.storeKick
+    1660   00:4981  21 00 FB                    ld      hl,FLIPPER_TIP_VY
+    1661   00:4984                      .storeKick:
+    1662   00:4984  22 06 C0                    ld      (BALL_VY),hl
+    1663   00:4987  3E 05                       ld      a,5
+    1664   00:4989  32 09 C0                    ld      (BUMPER_LOCK),a
+    1665   00:498C  C1                          pop     bc
+    1666   00:498D  C9                          ret
+    1667   00:498E                      .next:
+    1668   00:498E  C1                          pop     bc
+    1669   00:498F  11 08 00                    ld      de,8
+    1670   00:4992  FD 19                       add     iy,de
+    1671   00:4994  05                          dec     b
+    1672   00:4995  C2 E1 48                    jp      nz,.loop
+    1673   00:4998  C9                          ret
+    1674   00:4999                      
+    1675   00:4999                      ; Map instance control 0 uses the left state; control 1 uses the right state.
+    1676   00:4999                      GetInstanceFrame:
+    1677   00:4999  FD 7E 01                    ld      a,(iy+1)
+    1678   00:499C  B7                          or      a
+    1679   00:499D  3A 11 C0                    ld      a,(LEFT_FRAME)
+    1680   00:49A0  C8                          ret     z
+    1681   00:49A1  3A 12 C0                    ld      a,(RIGHT_FRAME)
+    1682   00:49A4  C9                          ret
+    1683   00:49A5                      
+    1684   00:49A5                      GetInstanceKick:
+    1685   00:49A5  FD 7E 01                    ld      a,(iy+1)
+    1686   00:49A8  B7                          or      a
+    1687   00:49A9  3A 16 C0                    ld      a,(LEFT_KICK)
+    1688   00:49AC  C8                          ret     z
+    1689   00:49AD  3A 17 C0                    ld      a,(RIGHT_KICK)
+    1690   00:49B0  C9                          ret
+    1691   00:49B1                      
+    1692   00:49B1                      ; Collision with a stationary flipper. The former circular collision samples
+    1693   00:49B1                      ; are gone; this response remains only for the polygon's long upper blade edge:
+    1694   00:49B1                      ; roughly 8 horizontal pixels for every 3 vertical pixels. This avoids treating
+    1695   00:49B1                      ; the flipper as a sticky horizontal shelf.
+    1696   00:49B1                      PassiveFlipperHit:
+    1697   00:49B1  2A 04 C0                    ld      hl,(BALL_VX)
+    1698   00:49B4  22 27 C0                    ld      (FLIPPER_OLD_VX),hl
+    1699   00:49B7  2A 06 C0                    ld      hl,(BALL_VY)
+    1700   00:49BA  22 29 C0                    ld      (FLIPPER_OLD_VY),hl
+    1701   00:49BD                      
+    1702   00:49BD                              ; Normal approach speed is 8*VY-3*VX for a \ slope and 8*VY+3*VX
+    1703   00:49BD                              ; for a / slope. If it is zero or negative, the ball already travels
+    1704   00:49BD                              ; away from the surface; responding again would cause contact jitter.
+    1705   00:49BD  29                          add     hl,hl
+    1706   00:49BE  29                          add     hl,hl
+    1707   00:49BF  29                          add     hl,hl                 ; HL = 8*VY
+    1708   00:49C0  EB                          ex      de,hl
+    1709   00:49C1  2A 27 C0                    ld      hl,(FLIPPER_OLD_VX)
+    1710   00:49C4  44                          ld      b,h
+    1711   00:49C5  4D                          ld      c,l
+    1712   00:49C6  29                          add     hl,hl
+    1713   00:49C7  09                          add     hl,bc                 ; HL = 3*VX
+    1714   00:49C8  3A 0C C0                    ld      a,(BALL_SIDE)
+    1715   00:49CB  FE 02                       cp      2
+    1716   00:49CD  28 08                       jr      z,.positiveSlope
+    1717   00:49CF  FE 03                       cp      3
+    1718   00:49D1  28 04                       jr      z,.positiveSlope
+    1719   00:49D3  EB                          ex      de,hl
+    1720   00:49D4  19                          add     hl,de                 ; / slope: 8*VY + 3*VX
+    1721   00:49D5  18 04                       jr      .normalReady
+    1722   00:49D7                      .positiveSlope:
+    1723   00:49D7  EB                          ex      de,hl
+    1724   00:49D8  B7                          or      a
+    1725   00:49D9  ED 52                       sbc     hl,de                 ; \ slope: 8*VY - 3*VX
+    1726   00:49DB                      .normalReady:
+    1727   00:49DB  22 2B C0                    ld      (FLIPPER_NORMAL),hl
+    1728   00:49DE  CB 7C                       bit     7,h
+    1729   00:49E0  C0                          ret     nz
+    1730   00:49E1  7C                          ld      a,h
+    1731   00:49E2  B5                          or      l
+    1732   00:49E3  C8                          ret     z
+    1733   00:49E4  7C                          ld      a,h
+    1734   00:49E5  FE 04                       cp      4                    ; small normal speed is resting contact
+    1735   00:49E7  DA 21 4A                    jp      c,PassiveFlipperRoll
+    1736   00:49EA                      
+    1737   00:49EA                              ; Tangential velocity loses very little energy. In this inexpensive
+    1738   00:49EA                              ; fixed-point approximation:
+    1739   00:49EA                              ;   VX' = 7/8*VX +/- 3/8*VY
+    1740   00:49EA                              ; The sign mirrors with the flipper slope.
+    1741   00:49EA  2A 27 C0                    ld      hl,(FLIPPER_OLD_VX)
+    1742   00:49ED  CD 73 4A                    call    DampHLSevenEighths
+    1743   00:49F0  E5                          push    hl
+    1744   00:49F1  2A 29 C0                    ld      hl,(FLIPPER_OLD_VY)
+    1745   00:49F4  CD 88 4A                    call    ScaleHLThreeEighths
+    1746   00:49F7  CD 67 4A                    call    NegateForNegativeFlipperSlope
+    1747   00:49FA  EB                          ex      de,hl
+    1748   00:49FB  E1                          pop     hl
+    1749   00:49FC  19                          add     hl,de
+    1750   00:49FD  22 04 C0                    ld      (BALL_VX),hl
+    1751   00:4A00                      
+    1752   00:4A00                              ; A hard impact returns about 1/4 of the normal component:
+    1753   00:4A00                              ;   VY' = +/-3/8*VX - 1/8*VY
+    1754   00:4A00  2A 27 C0                    ld      hl,(FLIPPER_OLD_VX)
+    1755   00:4A03  CD 88 4A                    call    ScaleHLThreeEighths
+    1756   00:4A06  CD 67 4A                    call    NegateForNegativeFlipperSlope
+    1757   00:4A09  EB                          ex      de,hl
+    1758   00:4A0A  2A 29 C0                    ld      hl,(FLIPPER_OLD_VY)
+    1759   00:4A0D  CB 2C                       sra     h
+    1760   00:4A0F  CB 1D                       rr      l
+    1761   00:4A11  CB 2C                       sra     h
+    1762   00:4A13  CB 1D                       rr      l
+    1763   00:4A15  CB 2C                       sra     h
+    1764   00:4A17  CB 1D                       rr      l                    ; HL = 1/8*old VY
+    1765   00:4A19  CD 93 48                    call    NegateHL
+    1766   00:4A1C  19                          add     hl,de
+    1767   00:4A1D  22 06 C0                    ld      (BALL_VY),hl
+    1768   00:4A20  C9                          ret
+    1769   00:4A21                      
+    1770   00:4A21                      ; A gentle contact is a support constraint, not a bounce and not glue. Project
+    1771   00:4A21                      ; velocity onto the blade tangent with coefficients close to the 8:3 slope.
+    1772   00:4A21                      ; Sixteenth-based fractions deliberately keep more useful low bits than a more
+    1773   00:4A21                      ; exact /64 approximation would on this 8.8 fixed-point Z80 simulation.
+    1774   00:4A21                      PassiveFlipperRoll:
+    1775   00:4A21  2A 27 C0                    ld      hl,(FLIPPER_OLD_VX)
+    1776   00:4A24  CD 73 4A                    call    DampHLSevenEighths
+    1777   00:4A27  E5                          push    hl
+    1778   00:4A28  2A 29 C0                    ld      hl,(FLIPPER_OLD_VY)
+    1779   00:4A2B  CD 99 4A                    call    ScaleHLFiveSixteenths
+    1780   00:4A2E  CD 67 4A                    call    NegateForNegativeFlipperSlope
+    1781   00:4A31  EB                          ex      de,hl
+    1782   00:4A32  E1                          pop     hl
+    1783   00:4A33  19                          add     hl,de
+    1784   00:4A34                              ; This +/-3/256 impulse is gravity projected along the blade. It is an
+    1785   00:4A34                              ; acceleration rather than a minimum/fixed roll speed, so momentum is
+    1786   00:4A34                              ; preserved and the ball naturally gathers speed while descending.
+    1787   00:4A34  3A 0C C0                    ld      a,(BALL_SIDE)
+    1788   00:4A37  FE 02                       cp      2
+    1789   00:4A39  11 03 00                    ld      de,0003h
+    1790   00:4A3C  28 07                       jr      z,.addRollGravity
+    1791   00:4A3E  FE 03                       cp      3
+    1792   00:4A40  28 03                       jr      z,.addRollGravity
+    1793   00:4A42  11 FD FF                    ld      de,0fffdh
+    1794   00:4A45                      .addRollGravity:
+    1795   00:4A45  19                          add     hl,de
+    1796   00:4A46  22 04 C0                    ld      (BALL_VX),hl
+    1797   00:4A49                      
+    1798   00:4A49  2A 27 C0                    ld      hl,(FLIPPER_OLD_VX)
+    1799   00:4A4C  CD 99 4A                    call    ScaleHLFiveSixteenths
+    1800   00:4A4F  CD 67 4A                    call    NegateForNegativeFlipperSlope
+    1801   00:4A52  EB                          ex      de,hl
+    1802   00:4A53  2A 29 C0                    ld      hl,(FLIPPER_OLD_VY)
+    1803   00:4A56  CB 2C                       sra     h
+    1804   00:4A58  CB 1D                       rr      l
+    1805   00:4A5A  CB 2C                       sra     h
+    1806   00:4A5C  CB 1D                       rr      l
+    1807   00:4A5E  CB 2C                       sra     h
+    1808   00:4A60  CB 1D                       rr      l                    ; +1/8*old VY: no restitution at rest
+    1809   00:4A62  19                          add     hl,de
+    1810   00:4A63  22 06 C0                    ld      (BALL_VY),hl
+    1811   00:4A66  C9                          ret
+    1812   00:4A67                      
+    1813   00:4A67                      ; Side ids 2 (held right) and 3 (resting left) use a positive transfer term.
+    1814   00:4A67                      ; Sides 1 and 4 are their exact mirrors and therefore negate that term.
+    1815   00:4A67                      NegateForNegativeFlipperSlope:
+    1816   00:4A67  3A 0C C0                    ld      a,(BALL_SIDE)
+    1817   00:4A6A  FE 02                       cp      2
+    1818   00:4A6C  C8                          ret     z
+    1819   00:4A6D  FE 03                       cp      3
+    1820   00:4A6F  C8                          ret     z
+    1821   00:4A70  C3 93 48                    jp      NegateHL
+    1822   00:4A73                      
+    1823   00:4A73                      ; Return HL = HL * 7/8 while preserving its sign. This is deliberately much
+    1824   00:4A73                      ; less friction than the 3/4 damping used for a direct wall rebound.
+    1825   00:4A73                      DampHLSevenEighths:
+    1826   00:4A73  44                          ld      b,h
+    1827   00:4A74  4D                          ld      c,l
+    1828   00:4A75  CB 2C                       sra     h
+    1829   00:4A77  CB 1D                       rr      l
+    1830   00:4A79  CB 2C                       sra     h
+    1831   00:4A7B  CB 1D                       rr      l
+    1832   00:4A7D  CB 2C                       sra     h
+    1833   00:4A7F  CB 1D                       rr      l                   ; HL = original / 8
+    1834   00:4A81  EB                          ex      de,hl
+    1835   00:4A82  60                          ld      h,b
+    1836   00:4A83  69                          ld      l,c
+    1837   00:4A84  B7                          or      a
+    1838   00:4A85  ED 52                       sbc     hl,de               ; original - original/8
+    1839   00:4A87  C9                          ret
+    1840   00:4A88                      
+    1841   00:4A88                      ; Return HL = HL * 3/8 using signed arithmetic shifts. Flipper response uses
+    1842   00:4A88                      ; this for the small amount of velocity transferred across its diagonal slope.
+    1843   00:4A88                      ScaleHLThreeEighths:
+    1844   00:4A88  CB 2C                       sra     h
+    1845   00:4A8A  CB 1D                       rr      l
+    1846   00:4A8C  CB 2C                       sra     h
+    1847   00:4A8E  CB 1D                       rr      l
+    1848   00:4A90  CB 2C                       sra     h
+    1849   00:4A92  CB 1D                       rr      l                    ; HL = original / 8
+    1850   00:4A94  54                          ld      d,h
+    1851   00:4A95  5D                          ld      e,l
+    1852   00:4A96  29                          add     hl,hl                ; original / 4
+    1853   00:4A97  19                          add     hl,de                ; original * 3/8
+    1854   00:4A98  C9                          ret
+    1855   00:4A99                      
+    1856   00:4A99                      ; Return HL = HL * 5/16. This is slightly below the exact cross coefficient of
+    1857   00:4A99                      ; an 8:3 slope, ensuring contacts are stable while retaining precision at crawl
+    1858   00:4A99                      ; speeds (where a six-bit right shift would quantise the result to zero).
+    1859   00:4A99                      ScaleHLFiveSixteenths:
+    1860   00:4A99  CB 2C                       sra     h
+    1861   00:4A9B  CB 1D                       rr      l
+    1862   00:4A9D  CB 2C                       sra     h
+    1863   00:4A9F  CB 1D                       rr      l
+    1864   00:4AA1  CB 2C                       sra     h
+    1865   00:4AA3  CB 1D                       rr      l
+    1866   00:4AA5  CB 2C                       sra     h
+    1867   00:4AA7  CB 1D                       rr      l                    ; HL = original / 16
+    1868   00:4AA9  54                          ld      d,h
+    1869   00:4AAA  5D                          ld      e,l
+    1870   00:4AAB  29                          add     hl,hl                ; 2/16
+    1871   00:4AAC  29                          add     hl,hl                ; 4/16
+    1872   00:4AAD  19                          add     hl,de                ; 5/16
+    1873   00:4AAE  C9                          ret
+    1874   00:4AAF                      
+    1875   00:4AAF                      ; Select one of the six generated records. A is 0..2 for left frames and 3..5
+    1876   00:4AAF                      ; for right frames. The binary header contains six offsets relative to its base.
+    1877   00:4AAF                      LoadFlipperCollisionField:
+    1878   00:4AAF  87                          add     a,a
+    1879   00:4AB0  5F                          ld      e,a
+    1880   00:4AB1  16 00                       ld      d,0
+    1881   00:4AB3  21 EB 5E                    ld      hl,FlipperCollisionData
+    1882   00:4AB6  19                          add     hl,de
+    1883   00:4AB7  5E                          ld      e,(hl)
+    1884   00:4AB8  23                          inc     hl
+    1885   00:4AB9  56                          ld      d,(hl)
+    1886   00:4ABA  21 EB 5E                    ld      hl,FlipperCollisionData
+    1887   00:4ABD  19                          add     hl,de
+    1888   00:4ABE  E5                          push    hl
+    1889   00:4ABF  DD E1                       pop     ix
+    1890   00:4AC1  C9                          ret
+    1891   00:4AC2                      
+    1892   00:4AC2                      ; Record layout:
+    1893   00:4AC2                      ;   +0/+1 signed field origin relative to pivot, +2 width, +3 height
+    1894   00:4AC2                      ;   +4 base distance limit, +5 tip distance start, +6 packed normal field
+    1895   00:4AC2                      ; Return carry set and A=normal+1 when the current ball centre is in the field.
+    1896   00:4AC2                      LookupFlipperCollisionField:
+    1897   00:4AC2  DD 7E 00                    ld      a,(ix+0)
+    1898   00:4AC5  4F                          ld      c,a
+    1899   00:4AC6  3A 2F C0                    ld      a,(FLIPPER_PIVOT_X)
+    1900   00:4AC9  81                          add     a,c                   ; absolute field origin X
+    1901   00:4ACA  4F                          ld      c,a
+    1902   00:4ACB  3A 01 C0                    ld      a,(BALL_X+1)
+    1903   00:4ACE  C6 08                       add     a,8
+    1904   00:4AD0  91                          sub     c
+    1905   00:4AD1  38 59                       jr      c,.outside
+    1906   00:4AD3  DD BE 02                    cp      (ix+2)
+    1907   00:4AD6  30 54                       jr      nc,.outside
+    1908   00:4AD8  32 20 C0                    ld      (POLY_LOCAL_X),a
+    1909   00:4ADB                      
+    1910   00:4ADB  DD 7E 01                    ld      a,(ix+1)
+    1911   00:4ADE  4F                          ld      c,a
+    1912   00:4ADF  3A 2E C0                    ld      a,(FLIPPER_PIVOT_Y)
+    1913   00:4AE2  81                          add     a,c                   ; absolute field origin Y
+    1914   00:4AE3  4F                          ld      c,a
+    1915   00:4AE4  3A 03 C0                    ld      a,(BALL_Y+1)
+    1916   00:4AE7  C6 08                       add     a,8
+    1917   00:4AE9  91                          sub     c
+    1918   00:4AEA  38 40                       jr      c,.outside
+    1919   00:4AEC  DD BE 03                    cp      (ix+3)
+    1920   00:4AEF  30 3B                       jr      nc,.outside
+    1921   00:4AF1  4F                          ld      c,a                   ; local Y
+    1922   00:4AF2                      
+    1923   00:4AF2  DD 5E 02                    ld      e,(ix+2)
+    1924   00:4AF5  16 00                       ld      d,0
+    1925   00:4AF7  21 00 00                    ld      hl,0
+    1926   00:4AFA  79                          ld      a,c
+    1927   00:4AFB  B7                          or      a
+    1928   00:4AFC  28 04                       jr      z,.rowReady
+    1929   00:4AFE                      .rowLoop:
+    1930   00:4AFE  19                          add     hl,de
+    1931   00:4AFF  3D                          dec     a
+    1932   00:4B00  20 FC                       jr      nz,.rowLoop
+    1933   00:4B02                      .rowReady:
+    1934   00:4B02  3A 20 C0                    ld      a,(POLY_LOCAL_X)
+    1935   00:4B05  5F                          ld      e,a
+    1936   00:4B06  16 00                       ld      d,0
+    1937   00:4B08  19                          add     hl,de
+    1938   00:4B09  7D                          ld      a,l
+    1939   00:4B0A  E6 01                       and     1
+    1940   00:4B0C  32 21 C0                    ld      (POLY_FIELD_VALUE),a
+    1941   00:4B0F  CB 3C                       srl     h
+    1942   00:4B11  CB 1D                       rr      l
+    1943   00:4B13  DD E5                       push    ix
+    1944   00:4B15  D1                          pop     de
+    1945   00:4B16  19                          add     hl,de
+    1946   00:4B17  11 06 00                    ld      de,6
+    1947   00:4B1A  19                          add     hl,de
+    1948   00:4B1B  7E                          ld      a,(hl)
+    1949   00:4B1C  4F                          ld      c,a
+    1950   00:4B1D  3A 21 C0                    ld      a,(POLY_FIELD_VALUE)
+    1951   00:4B20  B7                          or      a
+    1952   00:4B21  79                          ld      a,c
+    1953   00:4B22  28 04                       jr      z,.lowNibble
+    1954   00:4B24  0F                          rrca
+    1955   00:4B25  0F                          rrca
+    1956   00:4B26  0F                          rrca
+    1957   00:4B27  0F                          rrca
+    1958   00:4B28                      .lowNibble:
+    1959   00:4B28  E6 0F                       and     00fh
+    1960   00:4B2A  37                          scf
+    1961   00:4B2B  C9                          ret
+    1962   00:4B2C                      .outside:
+    1963   00:4B2C  B7                          or      a
+    1964   00:4B2D  C9                          ret
+    1965   00:4B2E                      
+    1966   00:4B2E                      ; Store the absolute horizontal ball-centre distance from the current pivot.
+    1967   00:4B2E                      ; Generated thresholds in the selected record make kick zones asset-driven.
+    1968   00:4B2E                      MeasureFlipperDistance:
+    1969   00:4B2E  3A 01 C0                    ld      a,(BALL_X+1)
+    1970   00:4B31  C6 08                       add     a,8
+    1971   00:4B33  4F                          ld      c,a
+    1972   00:4B34  3A 2F C0                    ld      a,(FLIPPER_PIVOT_X)
+    1973   00:4B37  47                          ld      b,a
+    1974   00:4B38  79                          ld      a,c
+    1975   00:4B39  90                          sub     b
+    1976   00:4B3A  CD 9A 48                    call    AbsA
+    1977   00:4B3D  32 2D C0                    ld      (FLIPPER_DISTANCE),a
+    1978   00:4B40  C9                          ret
+    1979   00:4B41                      
+    1980   00:4B41                      ; Enter the covered pipe only from its open right-hand side while travelling
+    1981   00:4B41                      ; left. Normal collisions are suspended until StepTube reaches the exit.
+    1982   00:4B41                      CheckTubeEntrance:
+    1983   00:4B41                              ; The entrance is a small centre-coordinate rectangle. Requiring VX<0
+    1984   00:4B41                              ; prevents a ball travelling outwards from being recaptured immediately.
+    1985   00:4B41  2A 04 C0                    ld      hl,(BALL_VX)
+    1986   00:4B44  CB 7C                       bit     7,h
+    1987   00:4B46  C8                          ret     z
+    1988   00:4B47  3A 01 C0                    ld      a,(BALL_X+1)
+    1989   00:4B4A  C6 08                       add     a,8
+    1990   00:4B4C  FE 30                       cp      48
+    1991   00:4B4E  D8                          ret     c
+    1992   00:4B4F  FE 45                       cp      69
+    1993   00:4B51  D0                          ret     nc
+    1994   00:4B52  3A 03 C0                    ld      a,(BALL_Y+1)
+    1995   00:4B55  C6 08                       add     a,8
+    1996   00:4B57  FE 80                       cp      128
+    1997   00:4B59  D8                          ret     c
+    1998   00:4B5A  FE 8A                       cp      138
+    1999   00:4B5C  D0                          ret     nc
+    2000   00:4B5D                      
+    2001   00:4B5D  3E 01                       ld      a,1
+    2002   00:4B5F  32 0D C0                    ld      (BALL_IN_TUBE),a
+    2003   00:4B62  AF                          xor     a
+    2004   00:4B63  32 0E C0                    ld      (TUBE_INDEX),a
+    2005   00:4B66  32 09 C0                    ld      (BUMPER_LOCK),a
+    2006   00:4B69  21 00 00                    ld      hl,0
+    2007   00:4B6C  22 04 C0                    ld      (BALL_VX),hl
+    2008   00:4B6F  22 06 C0                    ld      (BALL_VY),hl
+    2009   00:4B72  C9                          ret
+    2010   00:4B73                      
+    2011   00:4B73                      StepTube:
+    2012   00:4B73                              ; TubePath stores top-left byte coordinates as X,Y pairs. Scripted
+    2013   00:4B73                              ; movement is deterministic and avoids collisions with the covered art.
+    2014   00:4B73  3A 0E C0                    ld      a,(TUBE_INDEX)
+    2015   00:4B76  5F                          ld      e,a
+    2016   00:4B77  16 00                       ld      d,0
+    2017   00:4B79  21 AB 4B                    ld      hl,TubePath
+    2018   00:4B7C  19                          add     hl,de
+    2019   00:4B7D  7E                          ld      a,(hl)
+    2020   00:4B7E  FE FF                       cp      0ffh
+    2021   00:4B80  28 18                       jr      z,.exit
+    2022   00:4B82  47                          ld      b,a
+    2023   00:4B83  23                          inc     hl
+    2024   00:4B84  4E                          ld      c,(hl)
+    2025   00:4B85  60                          ld      h,b
+    2026   00:4B86  2E 00                       ld      l,0
+    2027   00:4B88  22 00 C0                    ld      (BALL_X),hl
+    2028   00:4B8B  61                          ld      h,c
+    2029   00:4B8C  2E 00                       ld      l,0
+    2030   00:4B8E  22 02 C0                    ld      (BALL_Y),hl
+    2031   00:4B91  3A 0E C0                    ld      a,(TUBE_INDEX)
+    2032   00:4B94  C6 02                       add     a,2
+    2033   00:4B96  32 0E C0                    ld      (TUBE_INDEX),a
+    2034   00:4B99  C9                          ret
+    2035   00:4B9A                      .exit:
+    2036   00:4B9A                              ; Restore ordinary physics with a small upward/rightward exit velocity.
+    2037   00:4B9A  AF                          xor     a
+    2038   00:4B9B  32 0D C0                    ld      (BALL_IN_TUBE),a
+    2039   00:4B9E  21 00 02                    ld      hl,TUBE_EXIT_VX
+    2040   00:4BA1  22 04 C0                    ld      (BALL_VX),hl
+    2041   00:4BA4  21 80 FE                    ld      hl,TUBE_EXIT_VY
+    2042   00:4BA7  22 06 C0                    ld      (BALL_VY),hl
+    2043   00:4BAA  C9                          ret
+    2044   00:4BAB                      
+    2045   00:4BAB                      ; Top-left ball positions through the covered L-shaped pipe.  FF terminates it.
+    2046   00:4BAB                      TubePath:
+    2047   00:4BAB                              db      40,124,36,124,32,124,28,124,24,124,20,124
+    2047   00:4BAB  28 7C 24 7C 20 7C 1C 7C 18 7C 14 7C 
+    2048   00:4BB7                              db      20,120,20,116,20,112,20,108,20,104,20,100
+    2048   00:4BB7  14 78 14 74 14 70 14 6C 14 68 14 64 
+    2049   00:4BC3                              db      20,96,20,92,20,88,20,84,20,80,20,76
+    2049   00:4BC3  14 60 14 5C 14 58 14 54 14 50 14 4C 
+    2050   00:4BCF                              db      20,72,20,68,20,64,20,60,20,56,20,52
+    2050   00:4BCF  14 48 14 44 14 40 14 3C 14 38 14 34 
+    2051   00:4BDB                              db      20,48,20,44,20,40,20,36
+    2051   00:4BDB  14 30 14 2C 14 28 14 24 
+    2052   00:4BE3  FF                          db      0ffh
+    2053   00:4BE4                      
+    2054   00:4BE4                      ; The tilemap ends at Y=191. Anything continuing below the flippers reaches
+    2055   00:4BE4                      ; the shared drain line; static lower guides now come from collision tiles.
+    2056   00:4BE4                      CheckLowerTable:
+    2057   00:4BE4                              ; The authored map is 192 pixels high, while the drain threshold lies
+    2058   00:4BE4                              ; below the flippers. Crossing it parks a new ball in the launch lane.
+    2059   00:4BE4  3A 03 C0                    ld      a,(BALL_Y+1)
+    2060   00:4BE7  FE CC                       cp      DRAIN_Y
+    2061   00:4BE9  D8                          ret     c
+    2062   00:4BEA  C3 ED 4B                    jp      ResetBall
+    2063   00:4BED                      
+    2064   00:4BED                      ResetBall:
+    2065   00:4BED                              ; Reset gameplay state but deliberately leave an active object flash
+    2066   00:4BED                              ; alone: UpdateObjectAnimation will still restore its original pixels.
+    2067   00:4BED  21 00 E0                    ld      hl,224*256           ; two pixels farther right in launch lane
+    2068   00:4BF0  22 00 C0                    ld      (BALL_X),hl
+    2069   00:4BF3  21 00 B8                    ld      hl,184*256
+    2070   00:4BF6  22 02 C0                    ld      (BALL_Y),hl
+    2071   00:4BF9  21 00 00                    ld      hl,0
+    2072   00:4BFC  22 04 C0                    ld      (BALL_VX),hl
+    2073   00:4BFF  22 06 C0                    ld      (BALL_VY),hl
+    2074   00:4C02  3E 01                       ld      a,1
+    2075   00:4C04  32 08 C0                    ld      (BALL_WAITING),a
+    2076   00:4C07  AF                          xor     a
+    2077   00:4C08  32 09 C0                    ld      (BUMPER_LOCK),a
+    2078   00:4C0B  32 0D C0                    ld      (BALL_IN_TUBE),a
+    2079   00:4C0E  32 0E C0                    ld      (TUBE_INDEX),a
+    2080   00:4C11  32 0A C0                    ld      (LEFT_ACTIVE),a
+    2081   00:4C14  32 0B C0                    ld      (RIGHT_ACTIVE),a
+    2082   00:4C17  32 11 C0                    ld      (LEFT_FRAME),a
+    2083   00:4C1A  32 12 C0                    ld      (RIGHT_FRAME),a
+    2084   00:4C1D  32 16 C0                    ld      (LEFT_KICK),a
+    2085   00:4C20  32 17 C0                    ld      (RIGHT_KICK),a
+    2086   00:4C23  32 13 C0                    ld      (BALL_FRAME),a
+    2087   00:4C26  32 1F C0                    ld      (LAST_BUMPER_KIND),a
+    2088   00:4C29  21 00 00                    ld      hl,0
+    2089   00:4C2C  22 14 C0                    ld      (BALL_ROLL_ACCUM),hl
+    2090   00:4C2F  22 1B C0                    ld      (LAST_BUMPER_PTR),hl
+    2091   00:4C32  C9                          ret
+    2092   00:4C33                      
+    2093   00:4C33                      ; Queue one 16x16 object flash. A is the delta frame's X in the hidden atlas,
+    2094   00:4C33                      ; B/C are its playfield destination. Ignore another hit until this brief flash
+    2095   00:4C33                      ; has restored the first object, preventing abandoned highlighted graphics.
+    2096   00:4C33                      QueueObjectAnimation:
+    2097   00:4C33                              ; The build tool stores XOR differences, not complete frames. Source X
+    2098   00:4C33                              ; therefore identifies one 16x16 delta in hidden scanlines 212..227.
+    2099   00:4C33  FE FF                       cp      0ffh
+    2100   00:4C35  C8                          ret     z
+    2101   00:4C36  57                          ld      d,a
+    2102   00:4C37  3A 22 C0                    ld      a,(OBJECT_ANIM_TIMER)
+    2103   00:4C3A  B7                          or      a
+    2104   00:4C3B  C0                          ret     nz
+    2105   00:4C3C  7A                          ld      a,d
+    2106   00:4C3D  32 23 C0                    ld      (OBJECT_ANIM_SOURCE_X),a
+    2107   00:4C40  78                          ld      a,b
+    2108   00:4C41  32 24 C0                    ld      (OBJECT_ANIM_TARGET_X),a
+    2109   00:4C44  79                          ld      a,c
+    2110   00:4C45  32 25 C0                    ld      (OBJECT_ANIM_TARGET_Y),a
+    2111   00:4C48  3E 88                       ld      a,088h               ; pending draw plus eight visible frames
+    2112   00:4C4A  32 22 C0                    ld      (OBJECT_ANIM_TIMER),a
+    2113   00:4C4D  C9                          ret
+    2114   00:4C4E                      
+    2115   00:4C4E                      ; Run in VBlank. XOR the normal/hit delta once to show the hit frame, hold it
+    2116   00:4C4E                      ; for eight frames, then XOR the same pixels again to restore the original.
+    2117   00:4C4E                      UpdateObjectAnimation:
+    2118   00:4C4E                              ; Timer bit 7 means "not drawn yet". This defers the VDP command from
+    2119   00:4C4E                              ; the middle of physics to the next VBlank-safe video update.
+    2120   00:4C4E  3A 22 C0                    ld      a,(OBJECT_ANIM_TIMER)
+    2121   00:4C51  B7                          or      a
+    2122   00:4C52  C8                          ret     z
+    2123   00:4C53  CB 7F                       bit     7,a
+    2124   00:4C55  28 0A                       jr      z,.count
+    2125   00:4C57  E6 7F                       and     07fh
+    2126   00:4C59  32 22 C0                    ld      (OBJECT_ANIM_TIMER),a
+    2127   00:4C5C  3A 23 C0                    ld      a,(OBJECT_ANIM_SOURCE_X)
+    2128   00:4C5F  18 08                       jr      .draw
+    2129   00:4C61                      .count:
+    2130   00:4C61  3D                          dec     a
+    2131   00:4C62  32 22 C0                    ld      (OBJECT_ANIM_TIMER),a
+    2132   00:4C65  C0                          ret     nz
+    2133   00:4C66  3A 23 C0                    ld      a,(OBJECT_ANIM_SOURCE_X)
+    2134   00:4C69                      .draw:
+    2135   00:4C69  32 30 C0                    ld      (OBJECT_ANIM_COMMAND+0),a
+    2136   00:4C6C  3A 24 C0                    ld      a,(OBJECT_ANIM_TARGET_X)
+    2137   00:4C6F  32 34 C0                    ld      (OBJECT_ANIM_COMMAND+4),a
+    2138   00:4C72  3A 25 C0                    ld      a,(OBJECT_ANIM_TARGET_Y)
+    2139   00:4C75  32 36 C0                    ld      (OBJECT_ANIM_COMMAND+6),a
+    2140   00:4C78  21 30 C0                    ld      hl,OBJECT_ANIM_COMMAND
+    2141   00:4C7B  C3 47 4E                    jp      VDP_LMMM_XOR
+    2142   00:4C7E                      
+    2143   00:4C7E                      ; -----------------------------------------------------------------------------
+    2144   00:4C7E                      ; Video
+    2145   00:4C7E                      ; -----------------------------------------------------------------------------
+    2146   00:4C7E                      
+    2147   00:4C7E                      InitGraphics:
+    2148   00:4C7E                              ; Copy the mostly constant VDP command once; later flashes patch only
+    2149   00:4C7E                              ; source X and destination X/Y in this writable RAM block.
+    2150   00:4C7E  21 FE 50                    ld      hl,ObjectAnimationCommandTemplate
+    2151   00:4C81  11 30 C0                    ld      de,OBJECT_ANIM_COMMAND
+    2152   00:4C84  01 0F 00                    ld      bc,15
+    2153   00:4C87  ED B0                       ldir
+    2154   00:4C89  CD 35 4E                    call    InitPalette
+    2155   00:4C8C                      
+    2156   00:4C8C                              ; Enable 16x16, non-magnified sprites.
+    2157   00:4C8C  3A E0 F3                    ld      a,(RG1SAV)
+    2158   00:4C8F  E6 FE                       and     %11111110
+    2159   00:4C91  F6 02                       or      %00000010
+    2160   00:4C93  32 E0 F3                    ld      (RG1SAV),a
+    2161   00:4C96  47                          ld      b,a
+    2162   00:4C97  0E 01                       ld      c,1
+    2163   00:4C99  CD 47 00                    call    WRTVDP
+    2164   00:4C9C                      
+    2165   00:4C9C                              ; Upload the tile-rendered table composed from maps/pinbalmap.tmx and
+    2166   00:4C9C                              ; gfx/tileset.png. The last hidden rows contain animation XOR deltas.
+    2167   00:4C9C  CD C9 4C                    call    UploadPlayfield
+    2168   00:4C9F  CD F3 4C                    call    UploadPolygonObjects
+    2169   00:4CA2  CD D3 4D                    call    DrawFlippers
+    2170   00:4CA5                      
+    2171   00:4CA5                              ; Eight ball frames use two overlapping OR-sprites each.
+    2172   00:4CA5  21 BE 4E                    ld      hl,SpritePatterns
+    2173   00:4CA8  11 00 78                    ld      de,SPRITE_PATTERNS
+    2174   00:4CAB  01 00 02                    ld      bc,8*2*32
+    2175   00:4CAE  CD B3 4D                    call    CopyToVRAMPage1
+    2176   00:4CB1                      
+    2177   00:4CB1                              ; SCREEN 5 uses the MSX2 per-scanline sprite colour table.
+    2178   00:4CB1  21 BE 50                    ld      hl,SpriteColors
+    2179   00:4CB4  11 00 74                    ld      de,SPRITE_COLORS
+    2180   00:4CB7  01 20 00                    ld      bc,2*16
+    2181   00:4CBA  CD B3 4D                    call    CopyToVRAMPage1
+    2182   00:4CBD                      
+    2183   00:4CBD                              ; Copy static X/pattern fields and the end marker to writable RAM.
+    2184   00:4CBD  21 B2 4E                    ld      hl,InitialSAT
+    2185   00:4CC0  11 00 C1                    ld      de,SAT_SHADOW
+    2186   00:4CC3  01 0C 00                    ld      bc,12
+    2187   00:4CC6  ED B0                       ldir
+    2188   00:4CC8  C9                          ret
+    2189   00:4CC9                      
+    2190   00:4CC9                      ; Expand each compressed half through the reusable 16 KiB RAM window and copy
+    2191   00:4CC9                      ; it to VRAM. Both source streams stay below CPU address 8000h.
+    2192   00:4CC9                      UploadPlayfield:
+    2193   00:4CC9                              ; Page 2 (8000h-BFFFh) is RAM in this cartridge setup. It is a temporary
+    2194   00:4CC9                              ; buffer only: both compressed streams and live collision data remain
+    2195   00:4CC9                              ; directly readable below 8000h in the ROM page.
+    2196   00:4CC9  21 66 74                    ld      hl,PlayfieldBank0
+    2197   00:4CCC  11 00 80                    ld      de,08000h
+    2198   00:4CCF  CD FC 4C                    call    UnpackPletterRAM
+    2199   00:4CD2  21 00 80                    ld      hl,08000h
+    2200   00:4CD5  11 00 00                    ld      de,00000h
+    2201   00:4CD8  01 00 40                    ld      bc,04000h
+    2202   00:4CDB  CD 5C 00                    call    LDIRVM
+    2203   00:4CDE  21 1F 79                    ld      hl,PlayfieldBank1
+    2204   00:4CE1  11 00 80                    ld      de,08000h
+    2205   00:4CE4  CD FC 4C                    call    UnpackPletterRAM
+    2206   00:4CE7  21 00 80                    ld      hl,08000h
+    2207   00:4CEA  11 00 40                    ld      de,04000h
+    2208   00:4CED  01 00 40                    ld      bc,04000h
+    2209   00:4CF0  C3 5C 00                    jp      LDIRVM
+    2210   00:4CF3                      
+    2211   00:4CF3                      ; Polygon normal fields compress very well but can grow when the map gains
+    2212   00:4CF3                      ; objects. Keeping the packed stream in cartridge page 1 and expanding it into
+    2213   00:4CF3                      ; the now-free page-2 RAM avoids silently reading FFh beyond address 7FFFh.
+    2214   00:4CF3                      UploadPolygonObjects:
+    2215   00:4CF3  21 FC 7B                    ld      hl,PackedPolygonObjects
+    2216   00:4CF6  11 00 80                    ld      de,PolygonObjects
+    2217   00:4CF9  C3 FC 4C                    jp      UnpackPletterRAM
+    2218   00:4CFC                      
+    2219   00:4CFC                      ; Pletter v0.5c depacker. Each 16 KiB bank is unpacked to the free RAM window
+    2220   00:4CFC                      ; at 8000h-BFFFh and then copied to VRAM by UploadPlayfield.
+    2221   00:4CFC                      UnpackPletterRAM:
+    2222   00:4CFC                              ; Pletter combines literal bytes with backward copies. EXX keeps the
+    2223   00:4CFC                              ; compressed source and decompressed destination in separate register
+    2224   00:4CFC                              ; sets; IX selects the encoded offset mode and IY returns to the loop.
+    2225   00:4CFC  DD E5                       push    ix
+    2226   00:4CFE  FD E5                       push    iy
+    2227   00:4D00  7E                          ld      a,(hl)
+    2228   00:4D01  23                          inc     hl
+    2229   00:4D02  D9                          exx
+    2230   00:4D03  11 00 00                    ld      de,0
+    2231   00:4D06  87                          add     a,a
+    2232   00:4D07  3C                          inc     a
+    2233   00:4D08  CB 13                       rl      e
+    2234   00:4D0A  87                          add     a,a
+    2235   00:4D0B  CB 13                       rl      e
+    2236   00:4D0D  87                          add     a,a
+    2237   00:4D0E  CB 13                       rl      e
+    2238   00:4D10  CB 13                       rl      e
+    2239   00:4D12  21 A7 4D                    ld      hl,.modes
+    2240   00:4D15  19                          add     hl,de
+    2241   00:4D16  5E                          ld      e,(hl)
+    2242   00:4D17  DD 6B                       ld      ixl,e
+    2243   00:4D19  23                          inc     hl
+    2244   00:4D1A  5E                          ld      e,(hl)
+    2245   00:4D1B  DD 63                       ld      ixh,e
+    2246   00:4D1D  1E 01                       ld      e,1
+    2247   00:4D1F  D9                          exx
+    2248   00:4D20  FD 21 26 4D                 ld      iy,.loop
+    2249   00:4D24                      .literal:
+    2250   00:4D24  ED A0                       ldi
+    2251   00:4D26                      .loop:
+    2252   00:4D26  87                          add     a,a
+    2253   00:4D27  CC 9D 4D                    call    z,.getbit
+    2254   00:4D2A  30 F8                       jr      nc,.literal
+    2255   00:4D2C  D9                          exx
+    2256   00:4D2D  62                          ld      h,d
+    2257   00:4D2E  6B                          ld      l,e
+    2258   00:4D2F                      .getlen:
+    2259   00:4D2F  87                          add     a,a
+    2260   00:4D30  CC A1 4D                    call    z,.getbitexx
+    2261   00:4D33  30 1F                       jr      nc,.lenok
+    2262   00:4D35                      .lenloop:
+    2263   00:4D35  87                          add     a,a
+    2264   00:4D36  CC A1 4D                    call    z,.getbitexx
+    2265   00:4D39  ED 6A                       adc     hl,hl
+    2266   00:4D3B  DA 98 4D                    jp      c,.done
+    2267   00:4D3E  87                          add     a,a
+    2268   00:4D3F  CC A1 4D                    call    z,.getbitexx
+    2269   00:4D42  30 10                       jr      nc,.lenok
+    2270   00:4D44  87                          add     a,a
+    2271   00:4D45  CC A1 4D                    call    z,.getbitexx
+    2272   00:4D48  ED 6A                       adc     hl,hl
+    2273   00:4D4A  DA 98 4D                    jp      c,.done
+    2274   00:4D4D  87                          add     a,a
+    2275   00:4D4E  CC A1 4D                    call    z,.getbitexx
+    2276   00:4D51  DA 35 4D                    jp      c,.lenloop
+    2277   00:4D54                      .lenok:
+    2278   00:4D54  23                          inc     hl
+    2279   00:4D55  D9                          exx
+    2280   00:4D56  4E                          ld      c,(hl)
+    2281   00:4D57  23                          inc     hl
+    2282   00:4D58  06 00                       ld      b,0
+    2283   00:4D5A  CB 79                       bit     7,c
+    2284   00:4D5C  CA 89 4D                    jp      z,.offsetReady
+    2285   00:4D5F  DD E9                       jp      ix
+    2286   00:4D61                      .mode6:
+    2287   00:4D61  87                          add     a,a
+    2288   00:4D62  CC 9D 4D                    call    z,.getbit
+    2289   00:4D65  CB 10                       rl      b
+    2290   00:4D67                      .mode5:
+    2291   00:4D67  87                          add     a,a
+    2292   00:4D68  CC 9D 4D                    call    z,.getbit
+    2293   00:4D6B  CB 10                       rl      b
+    2294   00:4D6D                      .mode4:
+    2295   00:4D6D  87                          add     a,a
+    2296   00:4D6E  CC 9D 4D                    call    z,.getbit
+    2297   00:4D71  CB 10                       rl      b
+    2298   00:4D73                      .mode3:
+    2299   00:4D73  87                          add     a,a
+    2300   00:4D74  CC 9D 4D                    call    z,.getbit
+    2301   00:4D77  CB 10                       rl      b
+    2302   00:4D79                      .mode2:
+    2303   00:4D79  87                          add     a,a
+    2304   00:4D7A  CC 9D 4D                    call    z,.getbit
+    2305   00:4D7D  CB 10                       rl      b
+    2306   00:4D7F  87                          add     a,a
+    2307   00:4D80  CC 9D 4D                    call    z,.getbit
+    2308   00:4D83  30 04                       jr      nc,.offsetReady
+    2309   00:4D85  B7                          or      a
+    2310   00:4D86  04                          inc     b
+    2311   00:4D87  CB B9                       res     7,c
+    2312   00:4D89                      .offsetReady:
+    2313   00:4D89  03                          inc     bc
+    2314   00:4D8A  E5                          push    hl
+    2315   00:4D8B  D9                          exx
+    2316   00:4D8C  E5                          push    hl
+    2317   00:4D8D  D9                          exx
+    2318   00:4D8E  6B                          ld      l,e
+    2319   00:4D8F  62                          ld      h,d
+    2320   00:4D90  ED 42                       sbc     hl,bc
+    2321   00:4D92  C1                          pop     bc
+    2322   00:4D93  ED B0                       ldir
+    2323   00:4D95  E1                          pop     hl
+    2324   00:4D96  FD E9                       jp      iy
+    2325   00:4D98                      .done:
+    2326   00:4D98  FD E1                       pop     iy
+    2327   00:4D9A  DD E1                       pop     ix
+    2328   00:4D9C  C9                          ret
+    2329   00:4D9D                      
+    2330   00:4D9D                      .getbit:
+    2331   00:4D9D  7E                          ld      a,(hl)
+    2332   00:4D9E  23                          inc     hl
+    2333   00:4D9F  17                          rla
+    2334   00:4DA0  C9                          ret
+    2335   00:4DA1                      .getbitexx:
+    2336   00:4DA1  D9                          exx
+    2337   00:4DA2  7E                          ld      a,(hl)
+    2338   00:4DA3  23                          inc     hl
+    2339   00:4DA4  D9                          exx
+    2340   00:4DA5  17                          rla
+    2341   00:4DA6  C9                          ret
+    2342   00:4DA7                      .modes:
+    2343   00:4DA7                              dw      .offsetReady,.mode2,.mode3,.mode4,.mode5,.mode6
+    2343   00:4DA7  89 4D 79 4D 73 4D 6D 4D 67 4D 61 4D 
+    2344   00:4DB3                      
+    2345   00:4DB3                      ; Copy BC bytes to an address in VRAM bank 1. Sprite tables live between
+    2346   00:4DB3                      ; 07400h and 07800h; setting R#14 explicitly prevents BIOS/VDP bank state from
+    2347   00:4DB3                      ; turning uninitialised SAT data into a screen full of stray sprites.
+    2348   00:4DB3                      CopyToVRAMPage1:
+    2349   00:4DB3                              ; R#14 selects the 16 KiB VRAM bank. The following two writes set the
+    2350   00:4DB3                              ; 14-bit address with bit 6 marking a write operation.
+    2351   00:4DB3  F3                          di
+    2352   00:4DB4  E5                          push    hl
+    2353   00:4DB5  3E 01                       ld      a,1
+    2354   00:4DB7  D3 99                       out     (099h),a
+    2355   00:4DB9  3E 8E                       ld      a,14+128
+    2356   00:4DBB  D3 99                       out     (099h),a
+    2357   00:4DBD  7B                          ld      a,e
+    2358   00:4DBE  D3 99                       out     (099h),a
+    2359   00:4DC0  7A                          ld      a,d
+    2360   00:4DC1  E6 3F                       and     03fh
+    2361   00:4DC3  F6 40                       or      040h
+    2362   00:4DC5  D3 99                       out     (099h),a
+    2363   00:4DC7  E1                          pop     hl
+    2364   00:4DC8                      .byte:
+    2365   00:4DC8  7E                          ld      a,(hl)
+    2366   00:4DC9  D3 98                       out     (098h),a
+    2367   00:4DCB  23                          inc     hl
+    2368   00:4DCC  0B                          dec     bc
+    2369   00:4DCD  78                          ld      a,b
+    2370   00:4DCE  B1                          or      c
+    2371   00:4DCF  20 F7                       jr      nz,.byte
+    2372   00:4DD1  FB                          ei
+    2373   00:4DD2  C9                          ret
+    2374   00:4DD3                      
+    2375   00:4DD3                      ; Draw every map instance. Each owns three 34x23 frames baked over the local
+    2376   00:4DD3                      ; playfield background, so arbitrary placements restore their swept area.
+    2377   00:4DD3                      DrawFlippers:
+    2378   00:4DD3  3A 13 51                    ld      a,(FlipperInstances)
+    2379   00:4DD6  B7                          or      a
+    2380   00:4DD7  C8                          ret     z
+    2381   00:4DD8  47                          ld      b,a
+    2382   00:4DD9  FD 21 14 51                 ld      iy,FlipperInstances+1
+    2383   00:4DDD                      .loop:
+    2384   00:4DDD  C5                          push    bc
+    2385   00:4DDE  CD 99 49                    call    GetInstanceFrame
+    2386   00:4DE1  87                          add     a,a
+    2387   00:4DE2  5F                          ld      e,a
+    2388   00:4DE3  16 00                       ld      d,0
+    2389   00:4DE5  21 0D 51                    ld      hl,FlipperFrameOffsets
+    2390   00:4DE8  19                          add     hl,de
+    2391   00:4DE9  5E                          ld      e,(hl)
+    2392   00:4DEA  23                          inc     hl
+    2393   00:4DEB  56                          ld      d,(hl)
+    2394   00:4DEC  FD 6E 06                    ld      l,(iy+6)
+    2395   00:4DEF  FD 66 07                    ld      h,(iy+7)
+    2396   00:4DF2  19                          add     hl,de                 ; instance frame base + selected frame
+    2397   00:4DF3  11 2C 51                    ld      de,FlipperFrameData
+    2398   00:4DF6  19                          add     hl,de
+    2399   00:4DF7  FD 5E 04                    ld      e,(iy+4)
+    2400   00:4DFA  FD 56 05                    ld      d,(iy+5)             ; packed SCREEN 5 destination address
+    2401   00:4DFD  CD 09 4E                    call    DrawFlipperFrame
+    2402   00:4E00  C1                          pop     bc
+    2403   00:4E01  11 08 00                    ld      de,8
+    2404   00:4E04  FD 19                       add     iy,de
+    2405   00:4E06  10 D5                       djnz    .loop
+    2406   00:4E08  C9                          ret
+    2407   00:4E09                      
+    2408   00:4E09                      DrawFlipperFrame:
+    2409   00:4E09                              ; SCREEN 5 packs two horizontal pixels per byte, hence 34 pixels=17
+    2410   00:4E09                              ; bytes. Adding 128 bytes advances one complete 256-pixel scanline.
+    2411   00:4E09  F3                          di
+    2412   00:4E0A                              ; Destination bit 14 selects physical VRAM bank 0 or 1. The original
+    2413   00:4E0A                              ; two instances both lived below Y=128 and could hardcode bank 1; map
+    2414   00:4E0A                              ; instances may be anywhere on screen.
+    2415   00:4E0A  7A                          ld      a,d
+    2416   00:4E0B  E6 40                       and     040h
+    2417   00:4E0D  07                          rlca
+    2418   00:4E0E  07                          rlca                         ; D bit 6 -> R#14 value 0 or 1
+    2419   00:4E0F  D3 99                       out     (099h),a
+    2420   00:4E11  3E 8E                       ld      a,14+128
+    2421   00:4E13  D3 99                       out     (099h),a
+    2422   00:4E15  3E 17                       ld      a,23                 ; full pivot-aligned swept height
+    2423   00:4E17                      .row:
+    2424   00:4E17  F5                          push    af
+    2425   00:4E18  7B                          ld      a,e
+    2426   00:4E19  D3 99                       out     (099h),a
+    2427   00:4E1B  7A                          ld      a,d
+    2428   00:4E1C  E6 3F                       and     03fh
+    2429   00:4E1E  F6 40                       or      040h
+    2430   00:4E20  D3 99                       out     (099h),a
+    2431   00:4E22  0E 98                       ld      c,098h
+    2432   00:4E24  06 11                       ld      b,17                 ; 34 SCREEN 5 pixels
+    2433   00:4E26  ED B3                       otir
+    2434   00:4E28  7B                          ld      a,e
+    2435   00:4E29  C6 80                       add     a,128                ; next 256-pixel bitmap scanline
+    2436   00:4E2B  5F                          ld      e,a
+    2437   00:4E2C  30 01                       jr      nc,.noCarry
+    2438   00:4E2E  14                          inc     d
+    2439   00:4E2F                      .noCarry:
+    2440   00:4E2F  F1                          pop     af
+    2441   00:4E30  3D                          dec     a
+    2442   00:4E31  20 E4                       jr      nz,.row
+    2443   00:4E33  FB                          ei
+    2444   00:4E34  C9                          ret
+    2445   00:4E35                      
+    2446   00:4E35                      InitPalette:
+    2447   00:4E35  F3                          di
+    2448   00:4E36  AF                          xor     a                    ; start at palette entry 0
+    2449   00:4E37  D3 99                       out     (099h),a
+    2450   00:4E39  3E 90                       ld      a,128+16
+    2451   00:4E3B  D3 99                       out     (099h),a
+    2452   00:4E3D  21 DE 50                    ld      hl,Screen5Palette
+    2453   00:4E40  01 9A 20                    ld      bc,32*256+09ah
+    2454   00:4E43  ED B3                       otir
+    2455   00:4E45  FB                          ei
+    2456   00:4E46  C9                          ret
+    2457   00:4E47                      
+    2458   00:4E47                      ; HL points to SX,SY,DX,DY,NX,NY (words), colour, ARG and LMMM-XOR command.
+    2459   00:4E47                      VDP_LMMM_XOR:
+    2460   00:4E47                              ; LMMM performs a logical pixel copy. XORing normal^hit over the normal
+    2461   00:4E47                              ; image produces hit; applying the identical command again restores it.
+    2462   00:4E47  CD 5D 4E                    call    WaitVDPCommand
+    2463   00:4E4A  01 99 8F                    ld      bc,(15+128)*256+099h
+    2464   00:4E4D  11 20 91                    ld      de,(17+128)*256+32
+    2465   00:4E50  F3                          di
+    2466   00:4E51  ED 59                       out     (c),e                ; indirect writes start at VDP R#32
+    2467   00:4E53  ED 51                       out     (c),d
+    2468   00:4E55  0E 9B                       ld      c,09bh
+    2469   00:4E57  06 0F                       ld      b,15
+    2470   00:4E59  ED B3                       otir                         ; R#32 through R#46, command last
+    2471   00:4E5B  FB                          ei
+    2472   00:4E5C  C9                          ret
+    2473   00:4E5D                      
+    2474   00:4E5D                      WaitVDPCommand:
+    2475   00:4E5D                              ; Status register 2 bit CE is one while a command-engine operation runs.
+    2476   00:4E5D                              ; Restore status-register selection to zero before returning to BIOS.
+    2477   00:4E5D                      .wait:
+    2478   00:4E5D  01 99 8F                    ld      bc,(15+128)*256+099h
+    2479   00:4E60  11 02 00                    ld      de,2                 ; select status register 2
+    2480   00:4E63  F3                          di
+    2481   00:4E64  ED 59                       out     (c),e
+    2482   00:4E66  ED 41                       out     (c),b
+    2483   00:4E68  DB 99                       in      a,(099h)
+    2484   00:4E6A  1F                          rra                          ; CE flag -> carry
+    2485   00:4E6B  3E 00                       ld      a,0                  ; select status register 0 again
+    2486   00:4E6D  ED 79                       out     (c),a
+    2487   00:4E6F  ED 41                       out     (c),b
+    2488   00:4E71  FB                          ei
+    2489   00:4E72  38 E9                       jr      c,.wait
+    2490   00:4E74  C9                          ret
+    2491   00:4E75                      
+    2492   00:4E75                      UpdateSprites:
+    2493   00:4E75                              ; Both sprite planes always receive the same X/Y. During tube travel Y
+    2494   00:4E75                              ; is moved off-screen while retaining the SAT end marker at entry three.
+    2495   00:4E75  3A 0D C0                    ld      a,(BALL_IN_TUBE)
+    2496   00:4E78  B7                          or      a
+    2497   00:4E79  28 0A                       jr      z,.ballVisible
+    2498   00:4E7B  3E D4                       ld      a,212                ; off-screen, without terminating the SAT
+    2499   00:4E7D  32 00 C1                    ld      (SAT_SHADOW+0),a
+    2500   00:4E80  32 04 C1                    ld      (SAT_SHADOW+4),a
+    2501   00:4E83  18 0A                       jr      .ballX
+    2502   00:4E85                      .ballVisible:
+    2503   00:4E85  3A 03 C0                    ld      a,(BALL_Y+1)
+    2504   00:4E88  3D                          dec     a                    ; MSX SAT stores Y-1
+    2505   00:4E89  32 00 C1                    ld      (SAT_SHADOW+0),a
+    2506   00:4E8C  32 04 C1                    ld      (SAT_SHADOW+4),a
+    2507   00:4E8F                      .ballX:
+    2508   00:4E8F  3A 01 C0                    ld      a,(BALL_X+1)
+    2509   00:4E92  32 01 C1                    ld      (SAT_SHADOW+1),a
+    2510   00:4E95  32 05 C1                    ld      (SAT_SHADOW+5),a
+    2511   00:4E98                      
+    2512   00:4E98                              ; Each frame occupies two 16x16 pattern slots: grey first, then the
+    2513   00:4E98                              ; black CC/OR layer. Pattern numbers therefore advance by eight.
+    2514   00:4E98  3A 13 C0                    ld      a,(BALL_FRAME)
+    2515   00:4E9B  87                          add     a,a
+    2516   00:4E9C  87                          add     a,a
+    2517   00:4E9D  87                          add     a,a
+    2518   00:4E9E  32 02 C1                    ld      (SAT_SHADOW+2),a
+    2519   00:4EA1  C6 04                       add     a,4
+    2520   00:4EA3  32 06 C1                    ld      (SAT_SHADOW+6),a
+    2521   00:4EA6                      
+    2522   00:4EA6                      .copySAT:
+    2523   00:4EA6  21 00 C1                    ld      hl,SAT_SHADOW
+    2524   00:4EA9  11 00 76                    ld      de,SPRITE_ATTR
+    2525   00:4EAC  01 0C 00                    ld      bc,12
+    2526   00:4EAF  C3 B3 4D                    jp      CopyToVRAMPage1
+    2527   00:4EB2                      
+    2528   00:4EB2                      InitialSAT:
+    2529   00:4EB2                              ; SAT entries are Y, X, pattern, flags. Two entries draw the overlapping
+    2530   00:4EB2                              ; colour planes; Y=216 terminates the hardware sprite list.
+    2531   00:4EB2  00 00 00 00                 db      0,0,0,0               ; grey/white ball plane
+    2532   00:4EB6  00 00 04 00                 db      0,0,4,0               ; black/white CC plane
+    2533   00:4EBA  D8 00 00 00                 db      216,0,0,0             ; end marker
+    2534   00:4EBE                      
+    2535   00:4EBE                      SpritePatterns:
+    2536   00:4EBE                              ; 8 directions * 2 overlapping 16x16 planes. Each plane contains a left
+    2537   00:4EBE                              ; and right 8-pixel pattern, hence 32 pattern bytes per plane/frame.
+    2538   00:4EBE  (0200)                      incbin  "gfx/ball_frames.spr"
+    2539   00:50BE                      
+    2540   00:50BE                      SpriteColors:
+    2541   00:50BE                              ; Colour 41h enables colour-combine (CC). Where the black plane overlaps
+    2542   00:50BE                              ; grey colour 14, the V9938 OR trick produces white as a third colour.
+    2543   00:50BE  0E (16)                     ds      16,14                 ; first plane: grey
+    2544   00:50CE  41 (16)                     ds      16,041h               ; second: black + CC; 14 OR 1 = white
+    2545   00:50DE                      
+    2546   00:50DE                      ; V9938 palette bytes: RRR0BBBB, 00000GGG.
+    2547   00:50DE                      Screen5Palette:
+    2548   00:50DE  00 00                       db      000h,0                ; 0 transparent
+    2549   00:50E0  00 00                       db      000h,0                ; 1 black
+    2550   00:50E2  10 07                       db      010h,7                ; 2 asset green
+    2551   00:50E4  06 06                       db      006h,6                ; 3 asset cyan
+    2552   00:50E6  14 00                       db      014h,0                ; 4 asset dark blue
+    2553   00:50E8  07 01                       db      007h,1                ; 5 asset blue
+    2554   00:50EA  60 01                       db      060h,1                ; 6 asset red
+    2555   00:50EC  63 04                       db      063h,4                ; 7 tileset beige
+    2556   00:50EE  71 04                       db      071h,4                ; 8 asset orange
+    2557   00:50F0  62 00                       db      062h,0                ; 9 asset pink
+    2558   00:50F2  70 07                       db      070h,7                ; 10 yellow
+    2559   00:50F4  74 06                       db      074h,6                ; 11 pale yellow
+    2560   00:50F6  22 02                       db      022h,2                ; 12 tileset dark grey
+    2561   00:50F8  52 01                       db      052h,1                ; 13 dark red
+    2562   00:50FA  55 05                       db      055h,5                ; 14 light grey
+    2563   00:50FC  77 07                       db      077h,7                ; 15 white
+    2564   00:50FE                      
+    2565   00:50FE                      ; The build stores normal-XOR-hit deltas in hidden VRAM scanlines 212..227.
+    2566   00:50FE                      ; Only SX, DX and DY are changed for each flash.
+    2567   00:50FE                      ObjectAnimationCommandTemplate:
+    2568   00:50FE  00 00                       dw      0                    ; SX
+    2569   00:5100  D4 00                       dw      212                  ; SY
+    2570   00:5102  00 00                       dw      0                    ; DX
+    2571   00:5104  00 00                       dw      0                    ; DY
+    2572   00:5106  10 00                       dw      16                   ; NX
+    2573   00:5108  10 00                       dw      16                   ; NY
+    2574   00:510A  00 00 93                    db      0,0,093h             ; colour, ARG, LMMM with XOR operation
+    2575   00:510D                      
+    2576   00:510D                      ; Offset of logical frame 0/1/2 inside each instance's three-frame block.
+    2577   00:510D                      FlipperFrameOffsets:
+    2578   00:510D  00 00 87 01 0E 03           dw      0,391,782
+    2579   00:5113                      
+    2580   00:5113                      ; Count byte plus eight-byte map instance records: side, control, pivot X/Y,
+    2581   00:5113                      ; packed VRAM destination and CPU graphics offset.
+    2582   00:5113                      FlipperInstances:
+    2583   00:5113  (0019)                      incbin  "gfx/flipper_instances.bin"
+    2584   00:512C                      
+    2585   00:512C                      ; Three pivot-aligned 34x23 SCREEN 5 frames per map instance.
+    2586   00:512C                      FlipperFrameData:
+    2587   00:512C  (0DBF)                      incbin  "gfx/flipper_frames.cor"
+    2588   00:5EEB                      
+    2589   00:5EEB                      ; Six pivot-relative polygon normal fields generated from maps/flippers.tmx.
+    2590   00:5EEB                      ; A twelve-byte offset header selects left0..2 followed by right0..2.
+    2591   00:5EEB                      FlipperCollisionData:
+    2592   00:5EEB  (1262)                      incbin  "gfx/flipper_collisions.bin"
+    2593   00:714D                      
+    2594   00:714D                      ; Static tile shapes plus Tiled PinballObjects. Object records also preserve
+    2595   00:714D                      ; kick and score metadata for gameplay extensions.
+    2596   00:714D                      CollisionMap:
+    2597   00:714D                              ; Exactly 32*24 bytes, one collision_shape value per background tile.
+    2598   00:714D  (0300)                      incbin  "gfx/collision_map.bin"
+    2599   00:744D                      CircleObjects:
+    2600   00:744D                              ; Count byte followed by fixed eight-byte ellipse/circle records.
+    2601   00:744D  (0019)                      incbin  "gfx/collision_circles.bin"
+    2602   00:7466                      
+    2603   00:7466                      ; Pletter-compressed SCREEN 5 banks generated from the tileset and TMX map.
+    2604   00:7466                      PlayfieldBank0:
+    2605   00:7466                              ; Decompresses to physical VRAM 0000h-3FFFh.
+    2606   00:7466  (04B9)                      incbin  "gfx/playfield_assets_0.plet5"
+    2607   00:791F                      PlayfieldBank1:
+    2608   00:791F                              ; Decompresses to physical VRAM 4000h-7FFFh, including hidden atlas rows.
+    2609   00:791F  (02DD)                      incbin  "gfx/playfield_assets_1.plet5"
+    2610   00:7BFC                      
+    2611   00:7BFC                      ; The packed stream stays below 8000h; UploadPolygonObjects expands its count
+    2612   00:7BFC                      ; byte and variable-size lookup records to page-2 RAM at startup.
+    2613   00:7BFC                      PackedPolygonObjects:
+    2614   00:7BFC  (01AE)                      incbin  "gfx/collision_polygons.plet5"
+    2615   00:7DAA                      
+    2616   00:7DAA                              ; A 32 KiB plain ROM is mapped unambiguously at 4000h-BFFFh by MSX
+    2617   00:7DAA                              ; emulators and real cartridge hardware.
+    2618   00:7DAA  FF (16982)                  ds      0c000h-$,0ffh
+
+    LABELS
+-------------------------------------------------
+00:0000005F   CHGMOD
+00:000000D5   GTSTCK
+00:000000D8   GTTRIG
+00:0000005C   LDIRVM
+00:00000047   WRTVDP
+00:0000F3E0   RG1SAV
+00:00007400   SPRITE_COLORS
+00:00007600   SPRITE_ATTR
+00:00007800   SPRITE_PATTERNS
+00:00000000   LEFT_WALL
+00:000000F0   RIGHT_WALL
+00:00000000   TOP_WALL
+00:000000CC   DRAIN_Y
+00:00000018   GRAVITY
+00:00000018   PHYSICS_GRAVITY
+00:00000500   MAX_FALL_SPEED
+00:0000FEC0   LAUNCH_VX
+00:0000F900   LAUNCH_VY
+00:0000FD00   FLIPPER_BASE_VY
+00:0000FC00   FLIPPER_MID_VY
+00:0000FB00   FLIPPER_TIP_VY
+00:00000200   TUBE_EXIT_VX
+00:0000FE80   TUBE_EXIT_VY
+00:0000C000   BALL_X
+00:0000C002   BALL_Y
+00:0000C004   BALL_VX
+00:0000C006   BALL_VY
+00:0000C008   BALL_WAITING
+00:0000C009   BUMPER_LOCK
+00:0000C00A   LEFT_ACTIVE
+00:0000C00B   RIGHT_ACTIVE
+00:0000C00C   BALL_SIDE
+00:0000C00D   BALL_IN_TUBE
+00:0000C00E   TUBE_INDEX
+00:0000C00F   BALL_HIT_X
+00:0000C010   BALL_HIT_Y
+00:0000C011   LEFT_FRAME
+00:0000C012   RIGHT_FRAME
+00:0000C013   BALL_FRAME
+00:0000C014   BALL_ROLL_ACCUM
+00:0000C016   LEFT_KICK
+00:0000C017   RIGHT_KICK
+00:0000C018   OBJECT_RADIUS
+00:0000C019   OBJECT_RADIUS_SQ
+00:0000C01B   LAST_BUMPER_PTR
+00:0000C01D   ABS_HIT_X
+00:0000C01E   ABS_HIT_Y
+00:0000C01F   LAST_BUMPER_KIND
+00:0000C020   POLY_LOCAL_X
+00:0000C021   POLY_FIELD_VALUE
+00:0000C022   OBJECT_ANIM_TIMER
+00:0000C023   OBJECT_ANIM_SOURCE_X
+00:0000C024   OBJECT_ANIM_TARGET_X
+00:0000C025   OBJECT_ANIM_TARGET_Y
+00:0000C027   FLIPPER_OLD_VX
+00:0000C029   FLIPPER_OLD_VY
+00:0000C02B   FLIPPER_NORMAL
+00:0000C02D   FLIPPER_DISTANCE
+00:0000C02E   FLIPPER_PIVOT_Y
+00:0000C02F   FLIPPER_PIVOT_X
+00:0000C030   OBJECT_ANIM_COMMAND
+00:0000C03F   OBJECT_CONTACT
+00:00008000   PolygonObjects
+00:0000C100   SAT_SHADOW
+00:00004010   Start
+00:0000402F   MainLoop
+00:00004044   ReadControls
+00:00004057   ReadControls.directionReady
+00:00004064   ReadControls.left
+00:00004069   ReadControls.testRight
+00:00004076   ReadControls.right
+00:0000407B   ReadControls.triggers
+00:00004091   UpdateFlipperAnimations
+00:000040B4   UpdateFlipperAnimations.leftRelease
+00:000040BA   UpdateFlipperAnimations.leftStore
+00:000040D8   UpdateFlipperAnimations.rightRelease
+00:000040DE   UpdateFlipperAnimations.rightStore
+00:000040E7   UpdateBallAnimation
+00:000040FC   UpdateBallAnimation.magnitudeReady
+00:00004120   UpdateBallAnimation.counterClockwise
+00:00004127   UpdateBallAnimation.storeDistance
+00:0000412B   ScaleSubstepDelta
+00:00004139   StepBall
+00:00004142   StepBall.notInTube
+00:00004162   StepBall.moving
+00:0000416C   StepBall.gravity
+00:0000417F   StepBall.storeVy
+00:00004184   StepBall.substep
+00:000041B1   StepBall.rightWall
+00:000041C6   StepBall.moveY
+00:000041F0   StepBall.objects
+00:00004209   StepBall.lowerTable
+00:00004218   StepBall.endStepBall
+00:0000421A   ResolveTileX
+00:0000423A   ResolveTileX.hitRightWall
+00:0000424F   ResolveTileX.movingLeft
+00:00004264   ResolveTileX.hitLeftWall
+00:00004279   ResolveTileY
+00:000042A5   ResolveTileY.hitFloor
+00:000042BA   ResolveTileY.movingUp
+00:000042F9   ResolveTileY.hitCeiling
+00:0000430E   ResolveSlopeFloor
+00:00004320   ResolveSlopeFloor.surfaceReady
+00:0000434E   ResolveSlopeFloor.backslash
+00:0000435C   ResolveSlopeCeiling
+00:0000436E   ResolveSlopeCeiling.surfaceReady
+00:00004376   ResolveSlopeCeiling.hit
+00:0000439C   ResolveSlopeCeiling.backslash
+00:000043AA   GetCollisionShape
+00:000043CE   GetCollisionShape.empty
+00:000043D0   NegateAndDamp
+00:000043E7   DampHL
+00:000043F8   CheckMapPolygons
+00:00004405   CheckMapPolygons.loop
+00:00004455   CheckMapPolygons.newActive
+00:0000446A   CheckMapPolygons.kickReady
+00:00004481   CheckMapPolygons.passive
+00:00004484   CheckMapPolygons.next
+00:00004491   LookupPolygonField
+00:000044BF   LookupPolygonField.rowLoop
+00:000044C3   LookupPolygonField.rowReady
+00:000044E9   LookupPolygonField.lowNibble
+00:000044ED   LookupPolygonField.outside
+00:000044EF   MaybeRearmLastPolygon
+00:00004532   MaybeRearmLastPolygon.rearm
+00:0000453D   CheckMapCircles
+00:00004549 X CheckMapCircles.haveObjects
+00:0000454A   CheckMapCircles.loop
+00:00004555   CheckMapCircles.radiusReady
+00:000045E9   CheckMapCircles.newActive
+00:000045FE   CheckMapCircles.kickReady
+00:00004606   CheckMapCircles.passive
+00:00004609   CheckMapCircles.activeHit
+00:0000461A   CheckMapCircles.discardNext
+00:0000461B   CheckMapCircles.next
+00:00004630   MaybeRearmLastBumper
+00:0000464A   MaybeRearmLastBumper.radiusReady
+00:0000468E   MaybeRearmLastBumper.rearm
+00:00004699   MaybeRearmLastBumper.discardRearm
+00:0000469C   SelectCircleNormal
+00:000046C3   SelectCircleNormal.diagLeft
+00:000046D0   SelectCircleNormal.horizontal
+00:000046DD   SelectCircleNormal.vertical
+00:000046E8   SelectCircleNormal.store
+00:000046EC   SeparateCircleOnePixel
+00:00004702 X SeparateCircleOnePixel.diagLeft
+00:00004707   SeparateCircleOnePixel.diagRight
+00:0000470A   SeparateCircleOnePixel.diagY
+00:00004711   SeparateCircleOnePixel.up
+00:0000471C   SeparateCircleOnePixel.down
+00:00004727   SeparateCircleOnePixel.left
+00:0000472A   SeparateCircleOnePixel.right
+00:0000472D   MoveBallLeftOne
+00:00004738   MoveBallRightOne
+00:00004743   PassiveCircleResponse
+00:00004756 X PassiveCircleResponse.right
+00:00004763   PassiveCircleResponse.left
+00:00004770   PassiveCircleResponse.down
+00:0000477D   PassiveCircleResponse.up
+00:0000478A   PassiveCircleResponse.diagonal
+00:000047A5   PassiveCircleResponse.testSE
+00:000047B2   PassiveCircleResponse.testSW
+00:000047C4   PassiveCircleResponse.testNW
+00:000047D4   PassiveCircleResponse.swap
+00:000047E9   PassiveCircleResponse.negSwap
+00:000047FE   AddCircleImpulse
+00:00004811   AddCircleImpulse.right
+00:0000481A   AddCircleImpulse.left
+00:0000481F   AddCircleImpulse.down
+00:00004828   AddCircleImpulse.up
+00:0000482D   AddCircleImpulse.diagonal
+00:0000483F   AddCircleImpulse.xPositive
+00:00004852   AddCircleImpulse.yPositive
+00:0000485B   ClampBallVelocity
+00:0000486E   ClampHLToFive
+00:00004872 X ClampHLToFive.positive
+00:0000487B   ClampHLToFive.positiveLimit
+00:0000487F   ClampHLToFive.negative
+00:0000488D   ClampHLToFive.negativeLimit
+00:00004890   ClampHLToFive.restoreNegative
+00:00004893   NegateHL
+00:0000489A   AbsA
+00:000048A0   SquareA
+00:000048AF   SquareTable
+00:000048D7   CheckFlippers
+00:000048E1   CheckFlippers.loop
+00:000048F2   CheckFlippers.fieldReady
+00:00004932   CheckFlippers.rightBlade
+00:0000493C   CheckFlippers.bladeReady
+00:00004944   CheckFlippers.genericPassive
+00:00004949   CheckFlippers.activeHit
+00:0000495F   CheckFlippers.inwardKick
+00:0000496B   CheckFlippers.storeKickX
+00:00004984   CheckFlippers.storeKick
+00:0000498E   CheckFlippers.next
+00:00004999   GetInstanceFrame
+00:000049A5   GetInstanceKick
+00:000049B1   PassiveFlipperHit
+00:000049D7   PassiveFlipperHit.positiveSlope
+00:000049DB   PassiveFlipperHit.normalReady
+00:00004A21   PassiveFlipperRoll
+00:00004A45   PassiveFlipperRoll.addRollGravity
+00:00004A67   NegateForNegativeFlipperSlope
+00:00004A73   DampHLSevenEighths
+00:00004A88   ScaleHLThreeEighths
+00:00004A99   ScaleHLFiveSixteenths
+00:00004AAF   LoadFlipperCollisionField
+00:00004AC2   LookupFlipperCollisionField
+00:00004AFE   LookupFlipperCollisionField.rowLoop
+00:00004B02   LookupFlipperCollisionField.rowReady
+00:00004B28   LookupFlipperCollisionField.lowNibble
+00:00004B2C   LookupFlipperCollisionField.outside
+00:00004B2E   MeasureFlipperDistance
+00:00004B41 X CheckTubeEntrance
+00:00004B73   StepTube
+00:00004B9A   StepTube.exit
+00:00004BAB   TubePath
+00:00004BE4   CheckLowerTable
+00:00004BED   ResetBall
+00:00004C33   QueueObjectAnimation
+00:00004C4E   UpdateObjectAnimation
+00:00004C61   UpdateObjectAnimation.count
+00:00004C69   UpdateObjectAnimation.draw
+00:00004C7E   InitGraphics
+00:00004CC9   UploadPlayfield
+00:00004CF3   UploadPolygonObjects
+00:00004CFC   UnpackPletterRAM
+00:00004D24   UnpackPletterRAM.literal
+00:00004D26   UnpackPletterRAM.loop
+00:00004D2F X UnpackPletterRAM.getlen
+00:00004D35   UnpackPletterRAM.lenloop
+00:00004D54   UnpackPletterRAM.lenok
+00:00004D61   UnpackPletterRAM.mode6
+00:00004D67   UnpackPletterRAM.mode5
+00:00004D6D   UnpackPletterRAM.mode4
+00:00004D73   UnpackPletterRAM.mode3
+00:00004D79   UnpackPletterRAM.mode2
+00:00004D89   UnpackPletterRAM.offsetReady
+00:00004D98   UnpackPletterRAM.done
+00:00004D9D   UnpackPletterRAM.getbit
+00:00004DA1   UnpackPletterRAM.getbitexx
+00:00004DA7   UnpackPletterRAM.modes
+00:00004DB3   CopyToVRAMPage1
+00:00004DC8   CopyToVRAMPage1.byte
+00:00004DD3   DrawFlippers
+00:00004DDD   DrawFlippers.loop
+00:00004E09   DrawFlipperFrame
+00:00004E17   DrawFlipperFrame.row
+00:00004E2F   DrawFlipperFrame.noCarry
+00:00004E35   InitPalette
+00:00004E47   VDP_LMMM_XOR
+00:00004E5D   WaitVDPCommand
+00:00004E5D   WaitVDPCommand.wait
+00:00004E75   UpdateSprites
+00:00004E85   UpdateSprites.ballVisible
+00:00004E8F   UpdateSprites.ballX
+00:00004EA6 X UpdateSprites.copySAT
+00:00004EB2   InitialSAT
+00:00004EBE   SpritePatterns
+00:000050BE   SpriteColors
+00:000050DE   Screen5Palette
+00:000050FE   ObjectAnimationCommandTemplate
+00:0000510D   FlipperFrameOffsets
+00:00005113   FlipperInstances
+00:0000512C   FlipperFrameData
+00:00005EEB   FlipperCollisionData
+00:0000714D   CollisionMap
+00:0000744D   CircleObjects
+00:00007466   PlayfieldBank0
+00:0000791F   PlayfieldBank1
+00:00007BFC   PackedPolygonObjects
+
+
+ Output: pinball.out
+-------------------------------------------------
+
+ Page: 00
+  Org: 00004000  Size: *  Used: 00000000
+
+    No output
+
+ Output: pinball.rom
+-------------------------------------------------
+
+ Page: 00
+  Org: 00004000  Size: *  Used: 00008000
+
+   Address   Length Align   Label
+   00004000   32768         Start

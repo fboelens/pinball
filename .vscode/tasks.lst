@@ -1,0 +1,107 @@
+Sjasm Z80 Assembler v0.42c - www.xl2s.tk             [2023.08.30 - 21:28:41]
+
+tasks.json
+Errors: 45
+
+tasks.json(1) : Illegal label name
+       1   00:0000                      {
+tasks.json(2) : Unrecognized instruction: "version":
+       2   00:0000                          "version": "2.0.0",
+tasks.json(3) : Unrecognized instruction: "tasks":
+       3   00:0000                          "tasks": [
+tasks.json(4) : Unrecognized instruction: {
+       4   00:0000                              {
+tasks.json(5) : Unrecognized instruction: "label":
+       5   00:0000                                  "label": "SjASM current file",
+tasks.json(6) : Unrecognized instruction: "type":
+       6   00:0000                                  "type": "shell",
+tasks.json(7) : Unrecognized instruction: "command":
+       7   00:0000                                  "command": "sjasm",
+tasks.json(8) : Unrecognized instruction: "options":
+       8   00:0000                                  "options": {
+tasks.json(9) : Unrecognized instruction: "cwd":
+       9   00:0000                                      "cwd": "${fileDirname}"
+tasks.json(10) : Unrecognized instruction: },
+      10   00:0000                                  },
+tasks.json(11) : Unrecognized instruction: "args":
+      11   00:0000                                  "args": [
+tasks.json(12) : Unrecognized instruction: "-j",
+      12   00:0000                                      "-j",
+tasks.json(13) : Unrecognized instruction: "${fileBasename}",
+      13   00:0000                                      "${fileBasename}",
+tasks.json(14) : Unrecognized instruction: "${fileBasenameNoExtension}.
+      14   00:0000                                      "${fileBasenameNoExtension}.rom"
+tasks.json(15) : Unrecognized instruction: ],
+      15   00:0000                                  ],
+tasks.json(16) : Unrecognized instruction: "linux":
+      16   00:0000                                  "linux": {
+tasks.json(17) : Unrecognized instruction: "command":
+      17   00:0000                                      "command": "/usr/local/bin/sjasm",
+tasks.json(18) : Unrecognized instruction: },
+      18   00:0000                                  },
+tasks.json(19) : Unrecognized instruction: "osx":
+      19   00:0000                                  "osx": {
+tasks.json(20) : Unrecognized instruction: "command":
+      20   00:0000                                      "command": "/path/to/sjasm",
+tasks.json(21) : Unrecognized instruction: },
+      21   00:0000                                  },
+tasks.json(22) : Unrecognized instruction: "windows":
+      22   00:0000                                  "windows": {
+tasks.json(23) : Unrecognized instruction: "command":
+      23   00:0000                                      "command": "c:/msx/sjasm/sjasm.exe",
+tasks.json(24) : Unrecognized instruction: "options":
+      24   00:0000                                      "options": {
+tasks.json(25) : Unrecognized instruction: "shell":
+      25   00:0000                                          "shell": {
+tasks.json(26) : Unrecognized instruction: "executable":
+      26   00:0000                                              "executable": "C:\\WINDOWS\\System32\\cmd.exe",
+tasks.json(27) : Unrecognized instruction: "args":
+      27   00:0000                                              "args": ["/d", "/c"]
+tasks.json(28) : Unrecognized instruction: }
+      28   00:0000                                          }
+tasks.json(29) : Unrecognized instruction: }
+      29   00:0000                                      }
+tasks.json(30) : Unrecognized instruction: },
+      30   00:0000                                  },
+tasks.json(31) : Unrecognized instruction: "group":
+      31   00:0000                                  "group": {
+tasks.json(32) : Unrecognized instruction: "kind":
+      32   00:0000                                      "kind": "build",
+tasks.json(33) : Unrecognized instruction: "isDefault":
+      33   00:0000                                      "isDefault": false
+tasks.json(34) : Unrecognized instruction: },
+      34   00:0000                                  },
+tasks.json(35) : Unrecognized instruction: "isBackground":
+      35   00:0000                                  "isBackground": false,
+tasks.json(36) : Unrecognized instruction: "presentation":
+      36   00:0000                                  "presentation": {
+tasks.json(37) : Unrecognized instruction: "echo":
+      37   00:0000                                      "echo": false,
+tasks.json(38) : Unrecognized instruction: "reveal":
+      38   00:0000                                      "reveal": "silent",
+tasks.json(39) : Unrecognized instruction: "focus":
+      39   00:0000                                      "focus": false,
+tasks.json(40) : Unrecognized instruction: "panel":
+      40   00:0000                                      "panel": "shared"
+tasks.json(41) : Unrecognized instruction: },
+      41   00:0000                                  },
+tasks.json(42) : Unrecognized instruction: "problemMatcher":
+      42   00:0000                                  "problemMatcher": "$errmatcher-sjasm"
+tasks.json(43) : Unrecognized instruction: }
+      43   00:0000                              }
+tasks.json(44) : Unrecognized instruction: ]
+      44   00:0000                          ]
+tasks.json(45) : Illegal label name
+      45   00:0000                      }
+
+    LABELS
+-------------------------------------------------
+
+
+ Output: tasks.rom
+-------------------------------------------------
+
+ Page: 00
+  Org: 00000000  Size: *  Used: 00000000
+
+    No output
